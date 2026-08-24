@@ -1,0 +1,94 @@
+# ============================================
+#  Visual Studio / C++ / DirectX 12
+# ============================================
+
+# --- Visual Studio 캐시 · 사용자 설정 ---
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.VC.db
+*.VC.VC.opendb
+*.sdf
+*.opensdf
+ipch/
+*.ipch
+*.aps
+
+# --- 빌드 산출물 ---
+[Dd]ebug/
+[Dd]ebugPublic/
+[Rr]elease/
+[Rr]eleases/
+x64/
+x86/
+[Ww][Ii][Nn]32/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bin/
+obj/
+[Bb]uild/
+[Oo]ut/
+
+# --- 컴파일 · 링크 중간 파일 ---
+*.obj
+*.o
+*.pdb
+*.ilk
+*.idb
+*.exp
+*.lib
+*.dll
+*.exe
+*.res
+*.tlog
+*.log
+*.lastbuildstate
+*.unsuccessfulbuild
+*.iobj
+*.ipdb
+*.pch
+*.tli
+*.tlh
+
+# --- 컴파일된 셰이더 ---
+# .hlsl / .usf 원본은 커밋, 컴파일 결과만 제외
+*.cso
+*.fxc
+*.dxil
+
+# --- 그래픽스 디버깅 캡처 (용량 큼) ---
+*.rdc
+*.wpix
+*.nvreport
+*.nsight-cuprof-report
+
+# --- CMake (쓰게 되면) ---
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+
+# --- 패키지 매니저 ---
+packages/
+vcpkg_installed/
+
+# --- OS 잡파일 ---
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# --- 에디터 ---
+.vscode/
+*.swp
+*~
+
+# ============================================
+#  아래는 반드시 커밋되어야 함 (참고용)
+#  *.sln  *.vcxproj  *.vcxproj.filters
+#  *.cpp  *.h  *.hlsl
+#  Common/  Textures/  Models/
+# ============================================
