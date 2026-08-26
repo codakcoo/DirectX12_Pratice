@@ -43,6 +43,7 @@ protected:
 
 	void OnResize();
 
+	ID3D12Resource* CurrentBackBuffer() const;
 	D3D12_CPU_DESCRIPTOR_HANDLE CurrentBackBufferView()const;
 	D3D12_CPU_DESCRIPTOR_HANDLE DepthStencilView()const;
 
@@ -78,7 +79,7 @@ protected:
 
 	static const int SwapChainBufferCount = 2;
 	int mCurrBackBuffer = 0;
-	UINT mCurrnetFence = 0;
+	UINT64 mCurrnetFence = 0;
 
 	D3D12_VIEWPORT	mScreenViewport;
 	D3D12_RECT		mScissorRect;
