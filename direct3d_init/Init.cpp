@@ -73,6 +73,9 @@ bool Init::Initialize()
 {
 	if(!InitWindow(mhAppInst)) return false;
 	if(!InitD3D()) return false;
+
+	OnResize();
+
 	return true;
 }
 int Init::Run()
@@ -159,7 +162,9 @@ bool Init::InitD3D()
 	/*
 	* 4. 명령 대기열과 명력 목록 생성
 	*/
-	CreateCommandObjects();	// 명령 대기열과 명령 목록 생성
+	CreateCommandObjects();				// 명령 대기열과 명령 목록 생성
+	CreateSwapChain();					// 스왑체인 생성
+	CreateRtvAndDsvDescriptorHeaps();	// Rtv(렌더대상), Dsv(딥스텐실뷰) 생성
 
 	return true;
 }
@@ -192,7 +197,7 @@ void Init::CreateCommandObjects()
 
 void Init::FlushCommandQueue()
 {
-	mCurrBackBuffer++;					
+	mCurrnetFence++;
 	ThrowIfFailed(g_commandQueue->Signal(g_fence.Get(), mCurrnetFence));
 
 	if (g_fence->GetCompletedValue() < mCurrnetFence)
@@ -207,6 +212,46 @@ void Init::FlushCommandQueue()
 
 void Init::Draw()
 {
+	ThrowIfFailed(g_commandAllocator->Reset());
+	ThrowIfFailed(g_commandList->Reset(g_commandAllocator.Get(), nullptr));
+
+	// 재설정하기 위해 타입을 변경함.
+	// 표현(Present) -> 렌더 대상(Render_Target)
+	auto toRT = CD3DX12_RESOURCE_BARRIER::Transition(
+		CurrentBackBuffer(),
+		D3D12_RESOURCE_STATE_PRESENT,
+		D3D12_RESOURCE_STATE_RENDER_TARGET);
+	g_commandList->ResourceBarrier(1, &toRT);
+
+	// 명령대기를 재설정(Reset)했기에 뷰포트, 가위를 재설정
+	g_commandList->RSSetViewports(1, &mScreenViewport);
+	g_commandList->RSSetScissorRects(1, &mScissorRect);
+
+	const float clearColor[] = { 0.68f, 0.77f, 0.87f, 1.0f };			// LightSteelBlue
+	g_commandList->ClearRenderTargetView(CurrentBackBufferView(), clearColor, 0, nullptr);
+	g_commandList->ClearDepthStencilView(DepthStencilView(),
+		D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
+
+	auto rtv = CurrentBackBufferView();
+	auto dsv = DepthStencilView();
+	g_commandList->OMSetRenderTargets(1, &rtv, true, &dsv);
+
+	// 재설정을 완료했기에 다시 타입을 바꿈
+	// 렌더 대상(Render_Target) -> 표현(Present)
+	auto toPresent = CD3DX12_RESOURCE_BARRIER::Transition(
+		CurrentBackBuffer(),
+		D3D12_RESOURCE_STATE_RENDER_TARGET,
+		D3D12_RESOURCE_STATE_PRESENT);
+	g_commandList->ResourceBarrier(1, &toPresent);
+
+	ThrowIfFailed(g_commandList->Close());
+	ID3D12CommandList* cmdsLists[] = { g_commandList.Get() };
+	g_commandQueue->ExecuteCommandLists(_countof(cmdsLists), cmdsLists);
+
+	ThrowIfFailed(g_swapChain->Present(0,0));
+	mCurrBackBuffer = (mCurrBackBuffer+1) % SwapChainBufferCount;
+
+	FlushCommandQueue();
 }
 
 /*
@@ -264,16 +309,18 @@ void Init::CreateRtvAndDsvDescriptorHeaps()
 	));
 }
 
-
-D3D12_CPU_DESCRIPTOR_HANDLE Init::CurrentBackBufferView()const
+ID3D12Resource* Init::CurrentBackBuffer() const
+{
+	return g_SwapChainBuffer[mCurrBackBuffer].Get();
+}
+D3D12_CPU_DESCRIPTOR_HANDLE Init::CurrentBackBufferView() const
 {
 	// 편의를 위해 D3D12_CPU_DESCRIPTOR_HANDLE의 생성자를 사용한다.
 	// 이 생성자는 주어진 오프셋에 해당하는 후면 버퍼 RTV의 핸들(D3D12_CPU_DESCRIPTOR_HANDLE)을 돌려준다.
 	return CD3DX12_CPU_DESCRIPTOR_HANDLE(
 		g_rtvHeap->GetCPUDescriptorHandleForHeapStart(),		// 첫 핸들
 		mCurrBackBuffer,										// 오프셋 색인
-		g_rtvDescriptorSize										// 서술자의 바이트 크기
-	);
+		g_rtvDescriptorSize);									// 서술자의 바이트 크기
 }
 D3D12_CPU_DESCRIPTOR_HANDLE Init::DepthStencilView()const
 {
@@ -321,7 +368,7 @@ void Init::OnResize()
 		g_device->CreateRenderTargetView(
 			g_SwapChainBuffer[i].Get(), nullptr, rtvHeapHandle);
 		// 힙의 다음 항목으로 넘어간다.
-		rtvHeapHandle.Offset(i, g_rtvDescriptorSize);
+		rtvHeapHandle.Offset(1, g_rtvDescriptorSize);
 	}
 
 	/*
@@ -329,7 +376,7 @@ void Init::OnResize()
 	*/
 	// 깊이-스텐실 버퍼와 뷰를 생성한다.
 	// 리소스 서술 - 깊이 버퍼는 사실 2D 텍스처이다.
-	D3D12_RESOURCE_DESC depthStencilDesc;
+	D3D12_RESOURCE_DESC depthStencilDesc = {};
 	depthStencilDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
 	depthStencilDesc.Alignment = 0;
 	depthStencilDesc.Width = mClientWidth;
@@ -395,13 +442,11 @@ void Init::OnResize()
 	mScreenViewport.MinDepth	= 0.0f;
 	mScreenViewport.MaxDepth	= 1.0f;
 
-	g_commandList->RSSetViewports(0, &mScreenViewport);
 
 	/*
 	* 10. 가위 직사각형 설정 (명령 목록을 재설정(Reset)하면 가위 직사각형들도 재설정 해야함)
 	*/
-	mScissorRect = { 0, 0, mClientWidth/2, mClientHeight/2};
-	g_commandList->RSSetScissorRects(0, &mScissorRect);
+	mScissorRect = { 0, 0, mClientWidth, mClientHeight};
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
