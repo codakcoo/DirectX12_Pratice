@@ -192,14 +192,217 @@ void Init::CreateCommandObjects()
 
 void Init::FlushCommandQueue()
 {
+	mCurrBackBuffer++;					
+	ThrowIfFailed(g_commandQueue->Signal(g_fence.Get(), mCurrnetFence));
+
+	if (g_fence->GetCompletedValue() < mCurrnetFence)
+	{
+		// 큐에 적재한 명령들을 eventHandle을 통해 작업을 끝내 SIngle을 보낼때까지 Wait하다 종료.
+		HANDLE eventHandle = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
+		ThrowIfFailed(g_fence->SetEventOnCompletion(mCurrnetFence, eventHandle));
+		WaitForSingleObject(eventHandle, INFINITE);
+		CloseHandle(eventHandle);
+	}
 }
 
 void Init::Draw()
 {
 }
 
+/*
+* 5. 교환 사슬의 서술과 생성
+*/
+void Init::CreateSwapChain()
+{
+	// 새 교환 사슬을 생성하기 전에 먼저 기존 교환 사슬을 해제한다.
+	g_swapChain.Reset();
+
+	DXGI_SWAP_CHAIN_DESC sd;
+	sd.BufferDesc.Width = mClientWidth;
+	sd.BufferDesc.Height = mClientHeight;
+	sd.BufferDesc.RefreshRate.Numerator = 60;
+	sd.BufferDesc.RefreshRate.Denominator = 1;
+	sd.BufferDesc.Format = mBackBufferFormat;
+	sd.BufferDesc.ScanlineOrdering = DXGI_MODE_SCANLINE_ORDER_UNSPECIFIED;
+	sd.BufferDesc.Scaling = DXGI_MODE_SCALING_UNSPECIFIED;
+	sd.SampleDesc.Count = m4xMsaaState ? 4 : 1;
+	sd.SampleDesc.Quality = m4xMsaaState ? (m4xMsaaQuality - 1) : 0;
+	sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+	sd.BufferCount = SwapChainBufferCount;
+	sd.OutputWindow = mhMainWnd;
+	sd.Windowed = true;
+	sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+	sd.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+	// 참고: 교환 사슬은 명령 대기열을 이용해서 방출(flush)을 수행한다.
+	ThrowIfFailed(g_dxgiFactory->CreateSwapChain(
+		g_commandQueue.Get(),
+		&sd,
+		g_swapChain.GetAddressOf()));
+}
+
+/*
+* 6. 서술자 힙 생성
+*/
+void Init::CreateRtvAndDsvDescriptorHeaps()
+{
+	D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc;
+	rtvHeapDesc.NumDescriptors = SwapChainBufferCount;
+	rtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+	rtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+	rtvHeapDesc.NodeMask = 0;
+	ThrowIfFailed(g_device->CreateDescriptorHeap(
+		&rtvHeapDesc, IID_PPV_ARGS(g_rtvHeap.GetAddressOf())
+	));
+
+	D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc;
+	dsvHeapDesc.NumDescriptors = 1;
+	dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+	dsvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+	dsvHeapDesc.NodeMask = 0;
+	ThrowIfFailed(g_device->CreateDescriptorHeap(
+		&dsvHeapDesc, IID_PPV_ARGS(g_dsvHeap.GetAddressOf())
+	));
+}
 
 
+D3D12_CPU_DESCRIPTOR_HANDLE Init::CurrentBackBufferView()const
+{
+	// 편의를 위해 D3D12_CPU_DESCRIPTOR_HANDLE의 생성자를 사용한다.
+	// 이 생성자는 주어진 오프셋에 해당하는 후면 버퍼 RTV의 핸들(D3D12_CPU_DESCRIPTOR_HANDLE)을 돌려준다.
+	return CD3DX12_CPU_DESCRIPTOR_HANDLE(
+		g_rtvHeap->GetCPUDescriptorHandleForHeapStart(),		// 첫 핸들
+		mCurrBackBuffer,										// 오프셋 색인
+		g_rtvDescriptorSize										// 서술자의 바이트 크기
+	);
+}
+D3D12_CPU_DESCRIPTOR_HANDLE Init::DepthStencilView()const
+{
+	 return g_dsvHeap->GetCPUDescriptorHandleForHeapStart();
+}
+
+
+void Init::OnResize()
+{
+	/*
+	* 7. 렌더 대상 뷰(RTV) 생성
+	*/
+	assert(g_device);
+	assert(g_swapChain);
+	assert(g_commandAllocator);
+
+	// 자원을 변경하기전 flush
+	FlushCommandQueue();
+
+/*		블록 시작 전에		*/
+	ThrowIfFailed(g_commandList->Reset(g_commandAllocator.Get(), nullptr));
+
+	// 다시 생성할 이전 리소스를 해제
+	for(int i = 0; i < SwapChainBufferCount; ++i)
+		g_SwapChainBuffer[i].Reset();
+	g_depthStencilBuffer.Reset();
+
+	// 스왑 체인 사이즈 재조정
+	ThrowIfFailed(g_swapChain->ResizeBuffers(
+		SwapChainBufferCount,
+		mClientWidth, mClientHeight,
+		mBackBufferFormat,
+		DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH
+	));
+
+	mCurrBackBuffer = 0;
+
+	CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHeapHandle(
+		g_rtvHeap->GetCPUDescriptorHandleForHeapStart());
+	for (UINT i = 0; i < SwapChainBufferCount; ++i)
+	{
+		// 교환 사슬의 i번째 버퍼를 얻는다.
+		ThrowIfFailed(g_swapChain->GetBuffer(i, IID_PPV_ARGS(&g_SwapChainBuffer[i])));
+		// 그 버퍼에 대한 RTV를 생성한다.
+		g_device->CreateRenderTargetView(
+			g_SwapChainBuffer[i].Get(), nullptr, rtvHeapHandle);
+		// 힙의 다음 항목으로 넘어간다.
+		rtvHeapHandle.Offset(i, g_rtvDescriptorSize);
+	}
+
+	/*
+	* 8. 깊이-스텐실 버퍼와 뷰 생성
+	*/
+	// 깊이-스텐실 버퍼와 뷰를 생성한다.
+	// 리소스 서술 - 깊이 버퍼는 사실 2D 텍스처이다.
+	D3D12_RESOURCE_DESC depthStencilDesc;
+	depthStencilDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+	depthStencilDesc.Alignment = 0;
+	depthStencilDesc.Width = mClientWidth;
+	depthStencilDesc.Height = mClientHeight;
+	depthStencilDesc.DepthOrArraySize = 1;
+	depthStencilDesc.MipLevels = 1;
+	depthStencilDesc.Format = mDepthStencilFormat;
+	depthStencilDesc.SampleDesc.Count = m4xMsaaState ? 4 : 1;
+	depthStencilDesc.SampleDesc.Quality = m4xMsaaState ? (m4xMsaaQuality - 1) : 0;
+	depthStencilDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+	depthStencilDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+
+	// 클리어 최적화 값 - 이 값으로 지울 거라고 미리 알려줌
+	D3D12_CLEAR_VALUE optClear = {};
+	optClear.Format = mDepthStencilFormat;
+	optClear.DepthStencil.Depth = 1.0f;			// 가장 먼 깊이
+	optClear.DepthStencil.Stencil = 0;
+
+	CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_DEFAULT);
+	ThrowIfFailed(g_device->CreateCommittedResource(
+		&heapProps,
+		D3D12_HEAP_FLAG_NONE,
+		&depthStencilDesc,
+		D3D12_RESOURCE_STATE_COMMON,		// 초기 상태
+		&optClear,
+		IID_PPV_ARGS(g_depthStencilBuffer.GetAddressOf())));
+
+	// 전체 자원이 밉맵 수준 0에 대한 서술자를, 해당 자원의 픽셀 형식을 적용해서 생성한다.
+	D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
+	dsvDesc.Flags = D3D12_DSV_FLAG_NONE;
+	dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+	dsvDesc.Format = mDepthStencilFormat;
+	dsvDesc.Texture2D.MipSlice = 0;
+	g_device->CreateDepthStencilView(
+		g_depthStencilBuffer.Get(),				// 어떤 리소스를
+		&dsvDesc,								// 어떻게 볼지
+		DepthStencilView());					// 힙 어디에 쓸지
+	
+	// 자원을 초기 상태에서 깊이 버퍼로 사용할 수 있는 상태로 전이한다.
+	// COMMON으로 만들었으니 깊이 쓰기 용도로 쓰겠다고 알려줌
+	auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+		g_depthStencilBuffer.Get(),
+		D3D12_RESOURCE_STATE_COMMON,
+		D3D12_RESOURCE_STATE_DEPTH_WRITE);
+	g_commandList->ResourceBarrier(1, &barrier);
+
+/*		블록 끝난 후		*/
+	// 명령 목록을 닫은 후에 목록을 가져와 큐에 실어서 실행해준다.
+	ThrowIfFailed(g_commandList->Close());
+	ID3D12CommandList* cmdsLists[] = { g_commandList.Get() };
+	g_commandQueue->ExecuteCommandLists(_countof(cmdsLists), cmdsLists);
+
+	// 사이즈 조정을 끝낼때까지 대기 후 다음 실행
+	FlushCommandQueue();
+
+	/*
+	* 9. 뷰포트 설정 (명령 목록을 재설정(Reset)하면 뷰포트들도 재설정 해야함)
+	*/
+	mScreenViewport.TopLeftX	= 0;
+	mScreenViewport.TopLeftY	= 0;
+	mScreenViewport.Width		= static_cast<float>(mClientWidth);
+	mScreenViewport.Height		= static_cast<float>(mClientHeight);
+	mScreenViewport.MinDepth	= 0.0f;
+	mScreenViewport.MaxDepth	= 1.0f;
+
+	g_commandList->RSSetViewports(0, &mScreenViewport);
+
+	/*
+	* 10. 가위 직사각형 설정 (명령 목록을 재설정(Reset)하면 가위 직사각형들도 재설정 해야함)
+	*/
+	mScissorRect = { 0, 0, mClientWidth/2, mClientHeight/2};
+	g_commandList->RSSetScissorRects(0, &mScissorRect);
+}
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
