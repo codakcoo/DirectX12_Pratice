@@ -44,8 +44,6 @@ protected:
 	HINSTANCE mhAppInst = nullptr;
 	HWND mhMainWnd = nullptr;
 
-	HWND gMaindWnd = nullptr;
-
 	ComPtr<ID3D12Device> g_device;
 	ComPtr<IDXGIFactory4> g_dxgiFactory;
 	ComPtr<ID3D12Fence> g_fence;
