@@ -30,6 +30,7 @@ public:
 	// CALLBACK 없음. 그냥 멤버 함수
 	LRESULT MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 	
+protected:
 
 	bool InitWindow(HINSTANCE hInstance);
 	bool InitD3D();
@@ -37,6 +38,13 @@ public:
 	void FlushCommandQueue();
 	void Draw();
 
+	void CreateSwapChain();
+	void CreateRtvAndDsvDescriptorHeaps();
+
+	void OnResize();
+
+	D3D12_CPU_DESCRIPTOR_HANDLE CurrentBackBufferView()const;
+	D3D12_CPU_DESCRIPTOR_HANDLE DepthStencilView()const;
 
 protected:
 
@@ -67,4 +75,11 @@ protected:
 
 	bool m4xMsaaState = false; // 4X MSAA enabled
 	UINT m4xMsaaQuality = 0; // quality level of 4X MSAA
+
+	static const int SwapChainBufferCount = 2;
+	int mCurrBackBuffer = 0;
+	UINT mCurrnetFence = 0;
+
+	D3D12_VIEWPORT	mScreenViewport;
+	D3D12_RECT		mScissorRect;
 };
