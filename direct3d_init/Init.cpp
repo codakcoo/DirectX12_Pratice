@@ -50,12 +50,12 @@ bool Init::InitWindow(HINSTANCE hInstance)
 	RECT R = { 0, 0, mClientWidth, mClientHeight };
 	AdjustWindowRect(&R, WS_OVERLAPPEDWINDOW, FALSE);	// 클라이언트 영역 기준 보정
 
-	gMaindWnd = CreateWindow(L"MainWnd", L"Direct3D 12 Init", 
+	mhMainWnd = CreateWindow(L"MainWnd", L"Direct3D 12 Init", 
 			WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 
 			R.right - R.left, R.bottom - R.top, 
 			nullptr, nullptr, hInstance, nullptr);
 
-	if(!gMaindWnd)
+	if(!mhMainWnd)
 	{
 		DWORD err = GetLastError();
 		wchar_t buf[128];
@@ -64,18 +64,34 @@ bool Init::InitWindow(HINSTANCE hInstance)
 		return false;
 	}
 
-	ShowWindow(gMaindWnd, SW_SHOW);
-	UpdateWindow(gMaindWnd);
+	ShowWindow(mhMainWnd, SW_SHOW);
+	UpdateWindow(mhMainWnd);
 	return true;
 }
 
 bool Init::Initialize()
 {
+	if(!InitWindow(mhAppInst)) return false;
+	if(!InitD3D()) return false;
 	return true;
 }
 int Init::Run()
 {
-	return 1;
+	MSG msg = {};
+	while (msg.message != WM_QUIT)
+	{
+		if (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE))
+		{
+			TranslateMessage(&msg);
+			DispatchMessage(&msg);
+		}
+		else
+		{
+			Draw();
+		}
+	}
+	FlushCommandQueue();
+	return static_cast<int>(msg.wParam);
 }
 
 bool Init::InitD3D()
@@ -140,6 +156,10 @@ bool Init::InitD3D()
 	m4xMsaaQuality = msQualityLevels.NumQualityLevels;	// 지원되는 멀티샘플링 품질 수준 수
 	assert(m4xMsaaQuality > 0 && "Unexpected MSAA quality level.");	// 지원되는 멀티샘플링 품질 수준 수가 0이면 오류
 
+	/*
+	* 4. 명령 대기열과 명력 목록 생성
+	*/
+	CreateCommandObjects();	// 명령 대기열과 명령 목록 생성
 
 	return true;
 }
