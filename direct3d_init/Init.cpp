@@ -1,4 +1,5 @@
 #include "Init.h"
+#include <string>
 #include <assert.h>
 
 Init* Init::mApp = nullptr;						// 정적 멤버는 .cpp에서 정의 필수
@@ -81,6 +82,8 @@ bool Init::Initialize()
 int Init::Run()
 {
 	MSG msg = {};
+	mTimer.Reset();				// 루피 진입 전 1회
+
 	while (msg.message != WM_QUIT)
 	{
 		if (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE))
@@ -90,7 +93,9 @@ int Init::Run()
 		}
 		else
 		{
+			mTimer.Tick();					// 매 프레임
 			Draw();
+			CalculateFrameState();
 		}
 	}
 	FlushCommandQueue();
@@ -325,6 +330,27 @@ D3D12_CPU_DESCRIPTOR_HANDLE Init::CurrentBackBufferView() const
 D3D12_CPU_DESCRIPTOR_HANDLE Init::DepthStencilView()const
 {
 	 return g_dsvHeap->GetCPUDescriptorHandleForHeapStart();
+}
+
+void Init::CalculateFrameState()
+{
+	static int frameCnt = 0;
+	static float timeElapsed = 0.0f;
+
+	frameCnt++;
+
+	if (mTimer.TotalTime() - timeElapsed >= 1.0f)		// 1초마다
+	{
+		float fps = (float)frameCnt;
+		float mfps = 1000.0f / fps;
+
+		std::wstring text = L"Direct3D 12 Init     fps: " + std::to_wstring((int)fps)
+							+ L"      mfps: " + std::to_wstring(mfps);
+		SetWindowText(mhMainWnd, text.c_str());
+
+		frameCnt = 0;
+		timeElapsed += 1.0f;
+	}
 }
 
 

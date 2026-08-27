@@ -5,6 +5,7 @@
 #include <wrl.h>
 #include "d3dx12.h"
 #include "d3dUtil.h"
+#include "GameTimer.h"
 
 
 using Microsoft::WRL::ComPtr;
@@ -47,6 +48,8 @@ protected:
 	D3D12_CPU_DESCRIPTOR_HANDLE CurrentBackBufferView()const;
 	D3D12_CPU_DESCRIPTOR_HANDLE DepthStencilView()const;
 
+	void CalculateFrameState();
+
 protected:
 
 	static Init* mApp;				// 유일한 인스턴스를 가리킴
@@ -83,4 +86,6 @@ protected:
 
 	D3D12_VIEWPORT	mScreenViewport;
 	D3D12_RECT		mScissorRect;
+
+	GameTimer mTimer;
 };
