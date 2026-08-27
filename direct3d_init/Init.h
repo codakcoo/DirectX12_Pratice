@@ -1,5 +1,5 @@
 #pragma once
-#include <Windows.h>
+#include <WindowsX.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include <wrl.h>
@@ -14,10 +14,13 @@ using Microsoft::WRL::ComPtr;
 
 class Init
 {
-public:
-	Init(HINSTANCE hInstance);
-	~Init();
 
+public:
+
+	Init(HINSTANCE hInstance);
+	Init(const Init& rhs) = delete;
+	Init& operator= (const Init& rhs) = delete;
+	virtual ~Init();
 	/*
 	* 원인은 멤버 함수 포인터와 일반 함수 포인터가 다른 타입이기 때문
 	* WndProc을 클래스 멤버로 만들면 컴파일러가 숨겨진 this 매개변수를 하나 더 붙여
@@ -26,19 +29,25 @@ public:
 	*/
 	static Init* GetApp();			// 정적 접근자
 
-	bool Initialize();
 	int Run();
+
+	bool Initialize();
 	// CALLBACK 없음. 그냥 멤버 함수
 	LRESULT MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 	
+	bool Get4xMsaaState() const;
+	void Set4xMsaaState(bool value);
+
+
 protected:
 
 	bool InitWindow(HINSTANCE hInstance);
 	bool InitD3D();
-	void CreateCommandObjects();
-	void FlushCommandQueue();
+	void Update(const GameTimer& gt);
 	void Draw();
 
+	void CreateCommandObjects();
+	void FlushCommandQueue();
 	void CreateSwapChain();
 	void CreateRtvAndDsvDescriptorHeaps();
 
@@ -49,6 +58,10 @@ protected:
 	D3D12_CPU_DESCRIPTOR_HANDLE DepthStencilView()const;
 
 	void CalculateFrameState();
+
+	virtual void OnMouseDown(WPARAM btnState, int x, int y) { }
+	virtual void OnMouseUp(WPARAM btnState, int x, int y) { }
+	virtual void OnMouseMove(WPARAM btnState, int x, int y) { }
 
 protected:
 
@@ -86,6 +99,12 @@ protected:
 
 	D3D12_VIEWPORT	mScreenViewport;
 	D3D12_RECT		mScissorRect;
+
+	bool mAppPaused = false;
+	bool mMinimized = false;
+	bool mMaximized = false;
+	bool mResizing = false;
+	bool mFullscreenState = false;
 
 	GameTimer mTimer;
 };

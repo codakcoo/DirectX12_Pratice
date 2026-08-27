@@ -10,7 +10,7 @@ Init::Init(HINSTANCE hInstance) : mhAppInst(hInstance)
 	assert(mApp == nullptr);	// 유일한 인스턴스만 존재해야 함
 	mApp = this;				// 생성자에서 자신을 등록
 }
-Init::~Init() { mApp = nullptr; }	// 소멸자에서 자신을 해제
+Init::~Init() { if(g_device != nullptr) FlushCommandQueue(); mApp = nullptr; }	// 소멸자에서 자신을 해제
 
 // 클래스 밖의 전역 함수 - 이게 Windows에 넘어감
 LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -18,12 +18,96 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	return Init::GetApp()->MsgProc(hwnd, msg, wParam, lParam);
 }
 
+bool Init::Get4xMsaaState()const
+{
+	return m4xMsaaState;
+}
+
+void Init::Set4xMsaaState(bool value)
+{
+	if (m4xMsaaState != value)
+	{
+		m4xMsaaState = value;
+
+		// Recreate the swapchain and buffers with new multisample settings.
+		CreateSwapChain();
+		OnResize();
+	}
+}
+
 LRESULT Init::MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
 	switch (msg)
 	{
+	case WM_ACTIVATE:
+		if (LOWORD(wParam) == WA_INACTIVE)
+		{
+			mAppPaused = true;
+			mTimer.Stop();
+		}
+		else
+		{
+			mAppPaused = false;
+			mTimer.Start();
+		}
+		return 0;
+
+	// WM_ENTERSIZEMOVE는 사용자가 크기 변경 테두리를 잡으면 전달된다.
+	case WM_ENTERSIZEMOVE:
+		mAppPaused = true;
+		mResizing = true;
+		mTimer.Stop();
+		return 0;
+
+	// WM_EXITSIZEMOVE는 사용자가 크기 변경 테두리를 놓으면 전달된다.
+	// 그러면 차으 ㅣ새 크기에 맞게 모든 것을 재설정한다.
+	case WM_EXITSIZEMOVE:
+		mAppPaused = false;
+		mResizing = false;
+		mTimer.Start();
+		OnResize();
+		return 0;
+
+	// WM_DESTROY는 창이 파괴되려 할 때 전달된다.
 	case WM_DESTROY:
 		PostQuitMessage(0);
+		return 0;
+
+	// WM_MENUCHAR 메시지는 메뉴가 활성화되어서 사용자가 키를
+	// 눌렀지만 그 키가 그 어떤 니모닉이나 단축키에도 해당하지
+	// 않을 때 전달된다.
+	case WM_MENUCHAR:
+		// Alt-Enter를 눌렀을 때 삐 소리가 나지 않게 한다.
+		return MAKELRESULT(0, MNC_CLOSE);
+
+	// 창이 너무 작아지지 않게 하기 위해 이 메시지를 처리한다.
+	case WM_GETMINMAXINFO:
+		((MINMAXINFO*)lParam)->ptMinTrackSize.x = 200;
+		((MINMAXINFO*)lParam)->ptMinTrackSize.y = 200;
+		return 0;
+
+	// 마우스 입력 처리용 가상 함수들 정의(GET_X_LPARAM, GET_Y_LPARAM 매크로를 사용하기 위해서 Windowsx.h 를 포함시켜야 함)
+	case WM_LBUTTONDOWN:
+	case WM_MBUTTONDOWN:
+	case WM_RBUTTONDOWN:
+		OnMouseDown(wParam, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+		return 0;
+	case WM_LBUTTONUP:
+	case WM_MBUTTONUP:
+	case WM_RBUTTONUP:
+		OnMouseUp(wParam, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+		return 0;
+	case WM_MOUSEMOVE:
+		OnMouseMove(wParam, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+		return 0;
+	case WM_KEYUP:
+		if (wParam == VK_ESCAPE)
+		{
+			PostQuitMessage(0);
+		}
+		else if ((int)wParam == VK_F2)
+			Set4xMsaaState(!m4xMsaaState);
+
 		return 0;
 	}
 	return DefWindowProc(hwnd, msg, wParam, lParam);
@@ -94,8 +178,16 @@ int Init::Run()
 		else
 		{
 			mTimer.Tick();					// 매 프레임
-			Draw();
-			CalculateFrameState();
+			if (!mAppPaused)
+			{
+				CalculateFrameState();
+				Update(mTimer);
+				Draw();
+			}
+			else
+			{
+				Sleep(100);
+			}
 		}
 	}
 	FlushCommandQueue();
@@ -172,6 +264,10 @@ bool Init::InitD3D()
 	CreateRtvAndDsvDescriptorHeaps();	// Rtv(렌더대상), Dsv(딥스텐실뷰) 생성
 
 	return true;
+}
+
+void Init::Update(const GameTimer& gt)
+{
 }
 
 /*
