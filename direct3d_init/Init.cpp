@@ -1,4 +1,5 @@
 #include "Init.h"
+#include <directxmath.h>
 #include <string>
 #include <assert.h>
 
@@ -263,6 +264,20 @@ bool Init::InitD3D()
 	CreateSwapChain();					// 스왑체인 생성
 	CreateRtvAndDsvDescriptorHeaps();	// Rtv(렌더대상), Dsv(딥스텐실뷰) 생성
 
+	ThrowIfFailed(g_commandList->Reset(g_commandAllocator.Get(), nullptr));	// 명령 목록 초기화)
+
+	BuildDescriptorHeaps();	// 서술자 힙 생성
+	BuildConstantBuffers();	// 상수 버퍼 생성
+	BuildRootSignature();	// 루트 서명 생성
+	BuildShadersAndInputLayout();	// 쉐이더와 입력 레이아웃 생성
+	BuildBoxGeometry();	// 박스 지오메트리 생성, 여기서 정점/인덱스 버퍼 업로드 명령 기록
+	BuildPSO();	// 파이프라인 상태 객체 생성
+
+	ThrowIfFailed(g_commandList->Close());	// 명령 목록 닫기
+	ID3D12CommandList* cmdsLists[] = { g_commandList.Get() };
+	g_commandQueue->ExecuteCommandLists(_countof(cmdsLists), cmdsLists);	// 명령 목록 실행
+	FlushCommandQueue();	// 업로드 완료까지 대기 - 업로드 버퍼 해제해도 안전해짐
+
 	return true;
 }
 
@@ -316,6 +331,20 @@ void Init::Draw()
 	ThrowIfFailed(g_commandAllocator->Reset());
 	ThrowIfFailed(g_commandList->Reset(g_commandAllocator.Get(), nullptr));
 
+	XMMATRIX world = XMMatrixIdentity();
+	XMVECTOR pos = XMVectorSet(0.0f, 0.0f, -5.0f, 1.0f);		// 카메라를 -z에서 원점 바라보게
+	XMVECTOR target = XMVectorZero();									// 원점
+	XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);		// y축이 위쪽
+	XMMATRIX view = XMMatrixLookAtLH(pos, target, up);
+
+	XMMATRIX proj = XMMatrixPerspectiveFovLH(0.25f * XM_PI, (float)mClientWidth / mClientHeight, 1.0f, 1000.0f);
+
+	XMMATRIX worldViewProj = world * view * proj;
+
+	ObjectConstants objConstants;
+	XMStoreFloat4x4(&objConstants.World, XMMatrixTranspose(worldViewProj));	// HLSL은 행우선이므로 전치행렬로 변환
+	mObjectCB->CopyData(0, objConstants);
+
 	// 재설정하기 위해 타입을 변경함.
 	// 표현(Present) -> 렌더 대상(Render_Target)
 	auto toRT = CD3DX12_RESOURCE_BARRIER::Transition(
@@ -336,6 +365,22 @@ void Init::Draw()
 	auto rtv = CurrentBackBufferView();
 	auto dsv = DepthStencilView();
 	g_commandList->OMSetRenderTargets(1, &rtv, true, &dsv);
+
+	g_commandList->SetPipelineState(mPSO.Get());
+	g_commandList->SetGraphicsRootSignature(mRootSignature.Get());
+
+	ID3D12DescriptorHeap* heaps[] = { mCbvHeap.Get() };
+	g_commandList->SetDescriptorHeaps(_countof(heaps), heaps);
+
+	g_commandList->IASetVertexBuffers(0, 1, &mBoxGeo->VertexBufferView());
+	g_commandList->IASetIndexBuffer(&mBoxGeo->IndexBufferView());
+	g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+	g_commandList->SetGraphicsRootDescriptorTable(0, mCbvHeap->GetGPUDescriptorHandleForHeapStart());
+
+	g_commandList->DrawIndexedInstanced(
+		36, 1,
+		1, 0, 0);
 
 	// 재설정을 완료했기에 다시 타입을 바꿈
 	// 렌더 대상(Render_Target) -> 표현(Present)
@@ -447,6 +492,144 @@ void Init::CalculateFrameState()
 		frameCnt = 0;
 		timeElapsed += 1.0f;
 	}
+}
+
+void Init::BuildConstantBuffers()
+{
+	mObjectCB = std::make_unique<UploadBuffer<ObjectConstants>>(g_device.Get(), 1, true);
+
+	UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
+	D3D12_GPU_VIRTUAL_ADDRESS cbAddress = mObjectCB->Resource()->GetGPUVirtualAddress();
+
+	D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc;
+	cbvDesc.BufferLocation = cbAddress;
+	cbvDesc.SizeInBytes = objCBByteSize;
+
+	g_device->CreateConstantBufferView(&cbvDesc, mCbvHeap->GetCPUDescriptorHandleForHeapStart());
+}
+
+void Init::BuildDescriptorHeaps()
+{
+	D3D12_DESCRIPTOR_HEAP_DESC cbvHeapDesc = {};
+	cbvHeapDesc.NumDescriptors = 1;
+	cbvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+	cbvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+	g_device->CreateDescriptorHeap(&cbvHeapDesc, IID_PPV_ARGS(&mCbvHeap));
+}
+
+void Init::BuildRootSignature()
+{
+	CD3DX12_ROOT_PARAMETER slotRootParameter[1];
+
+	CD3DX12_DESCRIPTOR_RANGE cbvTable;
+	cbvTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0);	// b0, 개수 1
+	slotRootParameter[0].InitAsDescriptorTable(1, &cbvTable);
+
+	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(1, slotRootParameter, 0, nullptr, 
+		D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+	ComPtr<ID3DBlob> serializedRootSig = nullptr;
+	ComPtr<ID3DBlob> errorBlob = nullptr;
+	HRESULT hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
+		serializedRootSig.GetAddressOf(), errorBlob.GetAddressOf());
+
+	if(errorBlob != nullptr)
+	{
+		::OutputDebugStringA((char*)errorBlob->GetBufferPointer());
+	}
+	ThrowIfFailed(hr);
+
+	ThrowIfFailed(g_device->CreateRootSignature(
+		0,
+		serializedRootSig->GetBufferPointer(),
+		serializedRootSig->GetBufferSize(),
+		IID_PPV_ARGS(mRootSignature.GetAddressOf())));
+}
+
+void Init::BuildBoxGeometry()
+{
+	std::array<Vertex, 8> vertices =
+	{
+		Vertex({ XMFLOAT3(-1.0f, -1.0f, -1.0f), XMFLOAT4(Colors::White) }),
+		Vertex({ XMFLOAT3(-1.0f, +1.0f, -1.0f), XMFLOAT4(Colors::Black) }),
+		Vertex({ XMFLOAT3(+1.0f, +1.0f, -1.0f), XMFLOAT4(Colors::Red) }),
+		Vertex({ XMFLOAT3(+1.0f, -1.0f, -1.0f), XMFLOAT4(Colors::Green) }),
+		Vertex({ XMFLOAT3(-1.0f, -1.0f, +1.0f), XMFLOAT4(Colors::Blue) }),
+		Vertex({ XMFLOAT3(-1.0f, +1.0f, +1.0f), XMFLOAT4(Colors::Yellow) }),
+		Vertex({ XMFLOAT3(+1.0f, +1.0f, +1.0f), XMFLOAT4(Colors::Cyan) }),
+		Vertex({ XMFLOAT3(+1.0f, -1.0f, +1.0f), XMFLOAT4(Colors::Magenta) }),
+	};
+	std::array<std::uint16_t, 36> indices =
+	{
+		// 앞면
+		0, 1, 2,  0, 2, 3,
+		// 뒷면
+		4, 6, 5,  4, 7, 6,
+		// 왼쪽
+		4, 5, 1,  4, 1, 0,
+		// 오른쪽
+		3, 2, 6,  3, 6, 7,
+		// 윗면
+		1, 5, 6,  1, 6, 2,
+		// 아랫면
+		4, 0, 3,  4, 3, 7
+	};
+
+	const UINT vbByteSize = (UINT)vertices.size() * sizeof(Vertex);
+	const UINT ibByteSize = (UINT)indices.size() * sizeof(std::uint16_t);
+
+	mBoxGeo = std::make_unique<MeshGeometry>();
+
+	mBoxGeo->VertexBufferGPU = d3dUtil::CreateDefaultBuffer(
+		g_device.Get(),
+		g_commandList.Get(),
+		vertices.data(),
+		vbByteSize,
+		mBoxGeo->VertexBufferUploader);
+	mBoxGeo->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(
+		g_device.Get(),
+		g_commandList.Get(),
+		indices.data(),
+		ibByteSize,
+		mBoxGeo->IndexBufferUploader);
+
+	mBoxGeo->VertexByteStride = sizeof(Vertex);
+	mBoxGeo->VertexBufferByteSize = vbByteSize;
+	mBoxGeo->IndexFormat = DXGI_FORMAT_R16_UINT;
+	mBoxGeo->IndexBufferByteSize = ibByteSize;
+}
+
+void Init::BuildShadersAndInputLayout()
+{
+	mvsByteCode = d3dUtil::CompileShader(L"Shaders\\color.hlsl", nullptr, "VS", "vs_5_0");
+	mpsByteCode = d3dUtil::CompileShader(L"Shaders\\color.hlsl", nullptr, "PS", "ps_5_0");
+
+	mInputLayout =
+	{
+		{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+	};
+}
+
+void Init::BuildPSO()
+{
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+	psoDesc.InputLayout = { mInputLayout.data(), (UINT)mInputLayout.size() };
+	psoDesc.pRootSignature = mRootSignature.Get();
+	psoDesc.VS = { reinterpret_cast<BYTE*>(mvsByteCode->GetBufferPointer()), mvsByteCode->GetBufferSize() };
+	psoDesc.PS = { reinterpret_cast<BYTE*>(mpsByteCode->GetBufferPointer()), mpsByteCode->GetBufferSize() };
+	psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+	psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+	psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+	psoDesc.SampleMask = UINT_MAX;
+	psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	psoDesc.NumRenderTargets = 1;
+	psoDesc.RTVFormats[0] = mBackBufferFormat;
+	psoDesc.SampleDesc.Count = m4xMsaaState ? 4 : 1;
+	psoDesc.SampleDesc.Quality = m4xMsaaState ? (m4xMsaaQuality - 1) : 0;
+	psoDesc.DSVFormat = mDepthStencilFormat;
+
+	ThrowIfFailed(g_device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&mPSO)));
 }
 
 

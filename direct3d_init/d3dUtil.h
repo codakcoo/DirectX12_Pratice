@@ -3,7 +3,10 @@
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include <windows.h>
+#include <wrl.h>
 #include <string>
+
+using Microsoft::WRL::ComPtr;
 
 inline void d3dSetDebugName(IDXGIObject* obj, const char* name)
 {
@@ -36,6 +39,25 @@ inline std::wstring AnsiToWString(const std::string& str)
 
 class d3dUtil
 {
+public :
+    static UINT CalcConstantBufferByteSize(UINT byteSize)
+    {
+        // Constant buffer size is required to be a multiple of the minimum hardware
+        // allocation size (usually 256 bytes).  So round up to nearest multiple of 256.
+        return (byteSize + 255) & ~255;
+	}
+    static ComPtr<ID3D12Resource> CreateDefaultBuffer(
+        ID3D12Device* device,
+        ID3D12GraphicsCommandList* cmdList,
+        const void* initData,
+        UINT64 byteSize,
+		ComPtr<ID3D12Resource>& uploadBuffer);
+
+    static ComPtr<ID3DBlob> CompileShader(
+        const std::wstring& filename,
+        const D3D_SHADER_MACRO* defines,
+        const std::string& entrypoint,
+		const std::string& target);
 };
 
 class DxException

@@ -3,14 +3,64 @@
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include <wrl.h>
+#include <DirectXMath.h>
+#include <DirectXColors.h>
+#include <memory>
+#include <array>
+#include <vector>
 #include "d3dx12.h"
 #include "d3dUtil.h"
 #include "GameTimer.h"
+#include "UploadBuffer.h"
+#include "MathHelper.h"
 
 
 using Microsoft::WRL::ComPtr;
+using namespace DirectX;
+//using DirectX::XMFLOAT3;
+//using DirectX::XMFLOAT4;
 
+struct Vertex
+{
+	DirectX::XMFLOAT3 Pos;
+	DirectX::XMFLOAT4 Color;
+};
 
+struct ObjectConstants
+{
+	DirectX::XMFLOAT4X4 World = MathHelper::Identity4x4();
+};
+
+struct MeshGeometry
+{
+	ComPtr<ID3D12Resource> VertexBufferGPU = nullptr;
+	ComPtr<ID3D12Resource> VertexBufferUploader = nullptr;			// GPU 복사 끝날 때까지 살려둬야 함
+	ComPtr<ID3D12Resource> IndexBufferGPU = nullptr;
+	ComPtr<ID3D12Resource> IndexBufferUploader = nullptr;
+
+	UINT VertexByteStride = 0;
+	UINT VertexBufferByteSize = 0;
+	DXGI_FORMAT IndexFormat = DXGI_FORMAT_R16_UINT;
+	UINT IndexBufferByteSize = 0;
+
+	D3D12_VERTEX_BUFFER_VIEW VertexBufferView()const
+	{
+		D3D12_VERTEX_BUFFER_VIEW vbv;
+		vbv.BufferLocation = VertexBufferGPU->GetGPUVirtualAddress();
+		vbv.StrideInBytes = VertexByteStride;
+		vbv.SizeInBytes = VertexBufferByteSize;
+		return vbv;
+	}
+
+	D3D12_INDEX_BUFFER_VIEW IndexBufferView()const
+	{
+		D3D12_INDEX_BUFFER_VIEW ibv;
+		ibv.BufferLocation = IndexBufferGPU->GetGPUVirtualAddress();
+		ibv.Format = IndexFormat;
+		ibv.SizeInBytes = IndexBufferByteSize;
+		return ibv;
+	}
+};
 
 class Init
 {
@@ -63,6 +113,13 @@ protected:
 	virtual void OnMouseUp(WPARAM btnState, int x, int y) { }
 	virtual void OnMouseMove(WPARAM btnState, int x, int y) { }
 
+	void BuildConstantBuffers();
+	void BuildDescriptorHeaps();
+	void BuildRootSignature();
+	void BuildBoxGeometry();
+	void BuildShadersAndInputLayout();
+	void BuildPSO();
+
 protected:
 
 	static Init* mApp;				// 유일한 인스턴스를 가리킴
@@ -107,4 +164,15 @@ protected:
 	bool mFullscreenState = false;
 
 	GameTimer mTimer;
+
+	ComPtr<ID3D12RootSignature> mRootSignature = nullptr;
+	ComPtr<ID3D12PipelineState> mPSO = nullptr;
+
+	ComPtr<ID3D10Blob> mvsByteCode = nullptr;
+	ComPtr<ID3D10Blob> mpsByteCode = nullptr;
+	std::vector<D3D12_INPUT_ELEMENT_DESC> mInputLayout;
+
+	std::unique_ptr<MeshGeometry> mBoxGeo = nullptr;
+	std::unique_ptr<UploadBuffer<ObjectConstants>> mObjectCB = nullptr;
+	ComPtr<ID3D12DescriptorHeap> mCbvHeap = nullptr;
 };

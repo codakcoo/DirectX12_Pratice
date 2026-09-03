@@ -135,11 +135,19 @@
     <ClInclude Include="d3dx12.h" />
     <ClInclude Include="GameTimer.h" />
     <ClInclude Include="Init.h" />
+    <ClInclude Include="MathHelper.h" />
+    <ClInclude Include="UploadBuffer.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="d3dUtil.cpp" />
     <ClCompile Include="GameTimer.cpp" />
     <ClCompile Include="Init.cpp" />
+    <ClCompile Include="MathHelper.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Shaders\color.hlsl">
+      <FileType>Document</FileType>
+    </None>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
