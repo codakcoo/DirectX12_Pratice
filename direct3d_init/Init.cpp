@@ -283,6 +283,31 @@ bool Init::InitD3D()
 
 void Init::Update(const GameTimer& gt)
 {
+	// 회전 각도를 시간에 비례해서 증가
+	mTheta += 1.0f * gt.DeltaTime();	// 1rad/s(초당 1 라디안)
+
+	// 월드 행렬 - 매 프레임 새로 계산
+	XMMATRIX world = XMMatrixRotationY(mTheta);
+	XMStoreFloat4x4(&mWorld, XMMatrixTranspose(world));
+
+	// 뷰 행렬 - 카메라가 고정이면 여기서 한 번만 계산해도 되지만
+	// 지금은 이해를 위해 그냥 매 프레임 계산
+	XMVECTOR pos = XMVectorSet(0.0f, 0.0f, -5.0f, 1.0f);		// 카메라를 -z에서 원점 바라보게
+	XMVECTOR target = XMVectorZero();									// 원점
+	XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);		// y축이 위쪽
+	XMMATRIX view = XMMatrixLookAtLH(pos, target, up);
+	XMStoreFloat4x4(&mView, view);
+
+	// 투영 행렬
+	XMMATRIX proj = XMMatrixPerspectiveFovLH(0.25f * XM_PI, (float)mClientWidth / mClientHeight, 1.0f, 1000.0f);
+	XMStoreFloat4x4(&mProj, proj);
+
+	// 세 행렬을 합쳐서 상수 버퍼에 갱신
+	XMMATRIX worldViewProj = world * view * proj;
+
+	ObjectConstants objConstants;
+	XMStoreFloat4x4(&objConstants.World, XMMatrixTranspose(worldViewProj));	// HLSL은 행우선이므로 전치행렬로 변환
+	mObjectCB->CopyData(0, objConstants);	// 상수 버퍼에 복사
 }
 
 /*
@@ -331,19 +356,19 @@ void Init::Draw()
 	ThrowIfFailed(g_commandAllocator->Reset());
 	ThrowIfFailed(g_commandList->Reset(g_commandAllocator.Get(), nullptr));
 
-	XMMATRIX world = XMMatrixIdentity();
-	XMVECTOR pos = XMVectorSet(0.0f, 0.0f, -5.0f, 1.0f);		// 카메라를 -z에서 원점 바라보게
-	XMVECTOR target = XMVectorZero();									// 원점
-	XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);		// y축이 위쪽
-	XMMATRIX view = XMMatrixLookAtLH(pos, target, up);
-
-	XMMATRIX proj = XMMatrixPerspectiveFovLH(0.25f * XM_PI, (float)mClientWidth / mClientHeight, 1.0f, 1000.0f);
-
-	XMMATRIX worldViewProj = world * view * proj;
-
-	ObjectConstants objConstants;
-	XMStoreFloat4x4(&objConstants.World, XMMatrixTranspose(worldViewProj));	// HLSL은 행우선이므로 전치행렬로 변환
-	mObjectCB->CopyData(0, objConstants);
+	//XMMATRIX world = XMMatrixIdentity();
+	//XMVECTOR pos = XMVectorSet(0.0f, 0.0f, -5.0f, 1.0f);		// 카메라를 -z에서 원점 바라보게
+	//XMVECTOR target = XMVectorZero();									// 원점
+	//XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);		// y축이 위쪽
+	//XMMATRIX view = XMMatrixLookAtLH(pos, target, up);
+	//
+	//XMMATRIX proj = XMMatrixPerspectiveFovLH(0.25f * XM_PI, (float)mClientWidth / mClientHeight, 1.0f, 1000.0f);
+	//
+	//XMMATRIX worldViewProj = world * view * proj;
+	//
+	//ObjectConstants objConstants;
+	//XMStoreFloat4x4(&objConstants.World, XMMatrixTranspose(worldViewProj));	// HLSL은 행우선이므로 전치행렬로 변환
+	//mObjectCB->CopyData(0, objConstants);
 
 	// 재설정하기 위해 타입을 변경함.
 	// 표현(Present) -> 렌더 대상(Render_Target)

@@ -175,4 +175,10 @@ protected:
 	std::unique_ptr<MeshGeometry> mBoxGeo = nullptr;
 	std::unique_ptr<UploadBuffer<ObjectConstants>> mObjectCB = nullptr;
 	ComPtr<ID3D12DescriptorHeap> mCbvHeap = nullptr;
+
+	// ¿ùµå ÁÂÇ¥
+	float mTheta = 1.5f * XM_PI;
+	XMFLOAT4X4 mView = MathHelper::Identity4x4();
+	XMFLOAT4X4 mProj = MathHelper::Identity4x4();
+	XMFLOAT4X4 mWorld = MathHelper::Identity4x4();
 };
