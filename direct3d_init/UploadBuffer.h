@@ -17,7 +17,7 @@ public:
 		if (isConstantBuffer)
 			mElementByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(T));
 		auto uploadHeapProperties = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
-		auto bufferDesc = CD3DX12_RESOURCE_DESC::Buffer(mElementByte * elementCount);
+		auto bufferDesc = CD3DX12_RESOURCE_DESC::Buffer(mElementByteSize * elementCount);
 
 		device->CreateCommittedResource(
 			&uploadHeapProperties,

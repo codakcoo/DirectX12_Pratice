@@ -372,15 +372,18 @@ void Init::Draw()
 	ID3D12DescriptorHeap* heaps[] = { mCbvHeap.Get() };
 	g_commandList->SetDescriptorHeaps(_countof(heaps), heaps);
 
-	g_commandList->IASetVertexBuffers(0, 1, &mBoxGeo->VertexBufferView());
-	g_commandList->IASetIndexBuffer(&mBoxGeo->IndexBufferView());
+	auto vbv = mBoxGeo->VertexBufferView();
+	auto ibv = mBoxGeo->IndexBufferView();
+
+	g_commandList->IASetVertexBuffers(0, 1, &vbv);
+	g_commandList->IASetIndexBuffer(&ibv);
 	g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
 	g_commandList->SetGraphicsRootDescriptorTable(0, mCbvHeap->GetGPUDescriptorHandleForHeapStart());
 
 	g_commandList->DrawIndexedInstanced(
 		36, 1,
-		1, 0, 0);
+		0, 0, 0);
 
 	// 재설정을 완료했기에 다시 타입을 바꿈
 	// 렌더 대상(Render_Target) -> 표현(Present)

@@ -93,5 +93,5 @@ ComPtr<ID3DBlob> d3dUtil::CompileShader(
 
 	ThrowIfFailed(hr);
 
-    return ComPtr<ID3DBlob>();
+    return byteCode;
 }

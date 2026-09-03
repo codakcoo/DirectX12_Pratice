@@ -168,8 +168,8 @@ protected:
 	ComPtr<ID3D12RootSignature> mRootSignature = nullptr;
 	ComPtr<ID3D12PipelineState> mPSO = nullptr;
 
-	ComPtr<ID3D10Blob> mvsByteCode = nullptr;
-	ComPtr<ID3D10Blob> mpsByteCode = nullptr;
+	ComPtr<ID3D10Blob> mvsByteCode;
+	ComPtr<ID3D10Blob> mpsByteCode;
 	std::vector<D3D12_INPUT_ELEMENT_DESC> mInputLayout;
 
 	std::unique_ptr<MeshGeometry> mBoxGeo = nullptr;
