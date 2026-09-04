@@ -1,5 +1,5 @@
 #include "Init.h"
-#include <directxmath.h>
+#include <DirectXMath.h>
 #include <string>
 #include <assert.h>
 
@@ -16,7 +16,11 @@ Init::~Init() { if(g_device != nullptr) FlushCommandQueue(); mApp = nullptr; }	/
 // 클래스 밖의 전역 함수 - 이게 Windows에 넘어감
 LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-	return Init::GetApp()->MsgProc(hwnd, msg, wParam, lParam);
+	Init* app = Init::GetApp();
+	if (app == nullptr)
+		return DefWindowProc(hwnd, msg, wParam, lParam);   // 객체 없으면 기본 처리로 넘김
+
+	return app->MsgProc(hwnd, msg, wParam, lParam);
 }
 
 bool Init::Get4xMsaaState()const
@@ -266,12 +270,13 @@ bool Init::InitD3D()
 
 	ThrowIfFailed(g_commandList->Reset(g_commandAllocator.Get(), nullptr));	// 명령 목록 초기화)
 
-	BuildDescriptorHeaps();	// 서술자 힙 생성
-	BuildConstantBuffers();	// 상수 버퍼 생성
-	BuildRootSignature();	// 루트 서명 생성
-	BuildShadersAndInputLayout();	// 쉐이더와 입력 레이아웃 생성
-	BuildBoxGeometry();	// 박스 지오메트리 생성, 여기서 정점/인덱스 버퍼 업로드 명령 기록
-	BuildPSO();	// 파이프라인 상태 객체 생성
+	BuildDescriptorHeaps();						// 서술자 힙 생성
+	BuildConstantBuffers();						// 상수 버퍼 생성
+	BuildRootSignature();						// 루트 서명 생성
+	BuildShadersAndInputLayout();				// 쉐이더와 입력 레이아웃 생성
+	BuildBoxGeometry();							// 박스 지오메트리 생성, 여기서 정점/인덱스 버퍼 업로드 명령 기록
+	BuildFrameResources();						// 디바이스만 있으면 되니 근처 아무데나(g_device만 있으됨)
+	BuildPSO();									// 파이프라인 상태 객체 생성
 
 	ThrowIfFailed(g_commandList->Close());	// 명령 목록 닫기
 	ID3D12CommandList* cmdsLists[] = { g_commandList.Get() };
@@ -283,6 +288,20 @@ bool Init::InitD3D()
 
 void Init::Update(const GameTimer& gt)
 {
+	// 대기는 여기서....
+	// 프레임 링을 순환
+	mCurrFrameResourceIndex = (mCurrFrameResourceIndex + 1) % NumFrameResources;
+	mCurrFrameResource = mFrameResources[mCurrFrameResourceIndex].get();
+
+	// 이 프레임 자원이 아직도 GPU에서 사용 중이면(3프레임 전이니 보통은 끝나있음) 대기
+	if (mCurrFrameResource->Fence != 0 && g_fence->GetCompletedValue() < mCurrFrameResource->Fence)
+	{
+		HANDLE eventHandle = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);						// 이벤트 핸들 생성(전부 실행)
+		ThrowIfFailed(g_fence->SetEventOnCompletion(mCurrFrameResource->Fence, eventHandle));			// 이벤트 실행
+		WaitForSingleObject(eventHandle, INFINITE);														// 이벤트가 시그널을 보낼때까지 INFINITE 대기
+		CloseHandle(eventHandle);
+	}
+
 	// 회전 각도를 시간에 비례해서 증가
 	mTheta += 1.0f * gt.DeltaTime();	// 1rad/s(초당 1 라디안)
 
@@ -307,7 +326,7 @@ void Init::Update(const GameTimer& gt)
 
 	ObjectConstants objConstants;
 	XMStoreFloat4x4(&objConstants.World, XMMatrixTranspose(worldViewProj));	// HLSL은 행우선이므로 전치행렬로 변환
-	mObjectCB->CopyData(0, objConstants);	// 상수 버퍼에 복사
+	mCurrFrameResource->ObjectCB->CopyData(0, objConstants);	// 상수 버퍼에 복사
 }
 
 /*
@@ -353,22 +372,10 @@ void Init::FlushCommandQueue()
 
 void Init::Draw()
 {
-	ThrowIfFailed(g_commandAllocator->Reset());
-	ThrowIfFailed(g_commandList->Reset(g_commandAllocator.Get(), nullptr));
+	auto cmdListAlloc = mCurrFrameResource->CmdListAlloc;			// FrameResource의 얼로케이터
 
-	//XMMATRIX world = XMMatrixIdentity();
-	//XMVECTOR pos = XMVectorSet(0.0f, 0.0f, -5.0f, 1.0f);		// 카메라를 -z에서 원점 바라보게
-	//XMVECTOR target = XMVectorZero();									// 원점
-	//XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);		// y축이 위쪽
-	//XMMATRIX view = XMMatrixLookAtLH(pos, target, up);
-	//
-	//XMMATRIX proj = XMMatrixPerspectiveFovLH(0.25f * XM_PI, (float)mClientWidth / mClientHeight, 1.0f, 1000.0f);
-	//
-	//XMMATRIX worldViewProj = world * view * proj;
-	//
-	//ObjectConstants objConstants;
-	//XMStoreFloat4x4(&objConstants.World, XMMatrixTranspose(worldViewProj));	// HLSL은 행우선이므로 전치행렬로 변환
-	//mObjectCB->CopyData(0, objConstants);
+	ThrowIfFailed(cmdListAlloc->Reset());							// FrameResource에 있는 얼로케이터를 Reset
+	ThrowIfFailed(g_commandList->Reset(cmdListAlloc.Get(), mPSO.Get()));
 
 	// 재설정하기 위해 타입을 변경함.
 	// 표현(Present) -> 렌더 대상(Render_Target)
@@ -394,21 +401,19 @@ void Init::Draw()
 	g_commandList->SetPipelineState(mPSO.Get());
 	g_commandList->SetGraphicsRootSignature(mRootSignature.Get());
 
-	ID3D12DescriptorHeap* heaps[] = { mCbvHeap.Get() };
-	g_commandList->SetDescriptorHeaps(_countof(heaps), heaps);
+
 
 	auto vbv = mBoxGeo->VertexBufferView();
 	auto ibv = mBoxGeo->IndexBufferView();
-
 	g_commandList->IASetVertexBuffers(0, 1, &vbv);
 	g_commandList->IASetIndexBuffer(&ibv);
 	g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-	g_commandList->SetGraphicsRootDescriptorTable(0, mCbvHeap->GetGPUDescriptorHandleForHeapStart());
+	// CBV 힙 대신 FrameResouce의 상수 버퍼 GPU 주소를 직접 넘김
+	D3D12_GPU_VIRTUAL_ADDRESS objCBAddress = mCurrFrameResource->ObjectCB->Resource()->GetGPUVirtualAddress();
+	g_commandList->SetGraphicsRootConstantBufferView(0, objCBAddress);
 
-	g_commandList->DrawIndexedInstanced(
-		36, 1,
-		0, 0, 0);
+	g_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
 
 	// 재설정을 완료했기에 다시 타입을 바꿈
 	// 렌더 대상(Render_Target) -> 표현(Present)
@@ -425,7 +430,9 @@ void Init::Draw()
 	ThrowIfFailed(g_swapChain->Present(0,0));
 	mCurrBackBuffer = (mCurrBackBuffer+1) % SwapChainBufferCount;
 
-	FlushCommandQueue();
+	//FlushCommandQueue();
+	mCurrFrameResource->Fence = ++mCurrnetFence;
+	g_commandQueue->Signal(g_fence.Get(), mCurrnetFence);			// 안기다리고 바로 리턴 -> Update문에 있음....
 }
 
 /*
@@ -547,11 +554,9 @@ void Init::BuildDescriptorHeaps()
 
 void Init::BuildRootSignature()
 {
+	// cbv의 힙을 사용하지 않고 루트 디스크립터 방식으로 GPU 주소로 바로 때려박기 때문에 heap(공간), table(참조)를 안만들어도 됨.
 	CD3DX12_ROOT_PARAMETER slotRootParameter[1];
-
-	CD3DX12_DESCRIPTOR_RANGE cbvTable;
-	cbvTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0);	// b0, 개수 1
-	slotRootParameter[0].InitAsDescriptorTable(1, &cbvTable);
+	slotRootParameter[0].InitAsConstantBufferView(0);			// b0, 루트 디스크립터
 
 	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(1, slotRootParameter, 0, nullptr, 
 		D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
@@ -562,16 +567,14 @@ void Init::BuildRootSignature()
 		serializedRootSig.GetAddressOf(), errorBlob.GetAddressOf());
 
 	if(errorBlob != nullptr)
-	{
-		::OutputDebugStringA((char*)errorBlob->GetBufferPointer());
-	}
+		OutputDebugStringA((char*)errorBlob->GetBufferPointer());
 	ThrowIfFailed(hr);
 
 	ThrowIfFailed(g_device->CreateRootSignature(
 		0,
 		serializedRootSig->GetBufferPointer(),
 		serializedRootSig->GetBufferSize(),
-		IID_PPV_ARGS(mRootSignature.GetAddressOf())));
+		IID_PPV_ARGS(&mRootSignature)));
 }
 
 void Init::BuildBoxGeometry()
@@ -625,6 +628,14 @@ void Init::BuildBoxGeometry()
 	mBoxGeo->VertexBufferByteSize = vbByteSize;
 	mBoxGeo->IndexFormat = DXGI_FORMAT_R16_UINT;
 	mBoxGeo->IndexBufferByteSize = ibByteSize;
+}
+
+void Init::BuildFrameResources()
+{
+	for (int i = 0; i < NumFrameResources; ++i)
+	{
+		mFrameResources.push_back(std::make_unique<FrameResource>(g_device.Get(), 1));			// 물체 개수 1개
+	}
 }
 
 void Init::BuildShadersAndInputLayout()

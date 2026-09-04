@@ -13,6 +13,8 @@
 #include "GameTimer.h"
 #include "UploadBuffer.h"
 #include "MathHelper.h"
+#include "FrameResource.h"
+#include "GeometryTypes.h"
 
 
 using Microsoft::WRL::ComPtr;
@@ -20,51 +22,10 @@ using namespace DirectX;
 //using DirectX::XMFLOAT3;
 //using DirectX::XMFLOAT4;
 
-struct Vertex
-{
-	DirectX::XMFLOAT3 Pos;
-	DirectX::XMFLOAT4 Color;
-};
 
-struct ObjectConstants
-{
-	DirectX::XMFLOAT4X4 World = MathHelper::Identity4x4();
-};
-
-struct MeshGeometry
-{
-	ComPtr<ID3D12Resource> VertexBufferGPU = nullptr;
-	ComPtr<ID3D12Resource> VertexBufferUploader = nullptr;			// GPU 복사 끝날 때까지 살려둬야 함
-	ComPtr<ID3D12Resource> IndexBufferGPU = nullptr;
-	ComPtr<ID3D12Resource> IndexBufferUploader = nullptr;
-
-	UINT VertexByteStride = 0;
-	UINT VertexBufferByteSize = 0;
-	DXGI_FORMAT IndexFormat = DXGI_FORMAT_R16_UINT;
-	UINT IndexBufferByteSize = 0;
-
-	D3D12_VERTEX_BUFFER_VIEW VertexBufferView()const
-	{
-		D3D12_VERTEX_BUFFER_VIEW vbv;
-		vbv.BufferLocation = VertexBufferGPU->GetGPUVirtualAddress();
-		vbv.StrideInBytes = VertexByteStride;
-		vbv.SizeInBytes = VertexBufferByteSize;
-		return vbv;
-	}
-
-	D3D12_INDEX_BUFFER_VIEW IndexBufferView()const
-	{
-		D3D12_INDEX_BUFFER_VIEW ibv;
-		ibv.BufferLocation = IndexBufferGPU->GetGPUVirtualAddress();
-		ibv.Format = IndexFormat;
-		ibv.SizeInBytes = IndexBufferByteSize;
-		return ibv;
-	}
-};
 
 class Init
 {
-
 public:
 
 	Init(HINSTANCE hInstance);
@@ -117,6 +78,7 @@ protected:
 	void BuildDescriptorHeaps();
 	void BuildRootSignature();
 	void BuildBoxGeometry();
+	void BuildFrameResources();
 	void BuildShadersAndInputLayout();
 	void BuildPSO();
 
@@ -175,6 +137,14 @@ protected:
 	std::unique_ptr<MeshGeometry> mBoxGeo = nullptr;
 	std::unique_ptr<UploadBuffer<ObjectConstants>> mObjectCB = nullptr;
 	ComPtr<ID3D12DescriptorHeap> mCbvHeap = nullptr;
+
+
+	// FrameResource(Allocator 다중화를 위함)
+	static const int NumFrameResources = 3;
+
+	std::vector<std::unique_ptr<FrameResource>> mFrameResources;
+	FrameResource* mCurrFrameResource = nullptr;
+	int mCurrFrameResourceIndex = 0;
 
 	// 월드 좌표
 	float mTheta = 1.5f * XM_PI;
