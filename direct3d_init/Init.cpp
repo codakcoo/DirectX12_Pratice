@@ -276,6 +276,7 @@ bool Init::InitD3D()
 	BuildShadersAndInputLayout();				// 쉐이더와 입력 레이아웃 생성
 	BuildBoxGeometry();							// 박스 지오메트리 생성, 여기서 정점/인덱스 버퍼 업로드 명령 기록
 	BuildFrameResources();						// 디바이스만 있으면 되니 근처 아무데나(g_device만 있으됨)
+	BuildRenderItems();
 	BuildPSO();									// 파이프라인 상태 객체 생성
 
 	ThrowIfFailed(g_commandList->Close());	// 명령 목록 닫기
@@ -302,31 +303,34 @@ void Init::Update(const GameTimer& gt)
 		CloseHandle(eventHandle);
 	}
 
-	// 회전 각도를 시간에 비례해서 증가
-	mTheta += 1.0f * gt.DeltaTime();	// 1rad/s(초당 1 라디안)
-
-	// 월드 행렬 - 매 프레임 새로 계산
-	XMMATRIX world = XMMatrixRotationY(mTheta);
-	XMStoreFloat4x4(&mWorld, XMMatrixTranspose(world));
-
+	// 뷰/투영은 공통이니 한 번만
 	// 뷰 행렬 - 카메라가 고정이면 여기서 한 번만 계산해도 되지만
 	// 지금은 이해를 위해 그냥 매 프레임 계산
-	XMVECTOR pos = XMVectorSet(0.0f, 0.0f, -5.0f, 1.0f);		// 카메라를 -z에서 원점 바라보게
+	XMVECTOR pos = XMVectorSet(0.0f, 3.0f, -15.0f, 1.0f);		// 카메라를 -z에서 원점 바라보게
 	XMVECTOR target = XMVectorZero();									// 원점
 	XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);		// y축이 위쪽
 	XMMATRIX view = XMMatrixLookAtLH(pos, target, up);
 	XMStoreFloat4x4(&mView, view);
-
 	// 투영 행렬
 	XMMATRIX proj = XMMatrixPerspectiveFovLH(0.25f * XM_PI, (float)mClientWidth / mClientHeight, 1.0f, 1000.0f);
-	XMStoreFloat4x4(&mProj, proj);
 
-	// 세 행렬을 합쳐서 상수 버퍼에 갱신
-	XMMATRIX worldViewProj = world * view * proj;
+	// 물체마다 개별 계산해서 각자의 슬롯(index)에 복사
+	for (int i = 0; i < NumObjects; ++i)
+	{
+		mObjectThetas[i] += gt.DeltaTime() * (1.0f + i * 0.1f);					// 물체마다 속도 다르게
 
-	ObjectConstants objConstants;
-	XMStoreFloat4x4(&objConstants.World, XMMatrixTranspose(worldViewProj));	// HLSL은 행우선이므로 전치행렬로 변환
-	mCurrFrameResource->ObjectCB->CopyData(0, objConstants);	// 상수 버퍼에 복사
+		XMMATRIX baseTranslate = XMLoadFloat4x4(&mObjectWorlds[i]);
+		XMMATRIX spin = XMMatrixRotationY(mObjectThetas[i]);
+		XMMATRIX world = spin * baseTranslate;									// 자전 후 배치 위치로 이동
+
+		// 세 행렬을 합쳐서 상수 버퍼에 갱신
+		XMMATRIX worldViewProj = world * view * proj;
+
+		ObjectConstants objConstants;
+		XMStoreFloat4x4(&objConstants.World, XMMatrixTranspose(worldViewProj));	// HLSL은 행우선이므로 전치행렬로 변환
+		
+		mCurrFrameResource->ObjectCB->CopyData(i, objConstants);	// i번 슬롯에 상수 버퍼에 복사
+	}
 }
 
 /*
@@ -409,11 +413,21 @@ void Init::Draw()
 	g_commandList->IASetIndexBuffer(&ibv);
 	g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-	// CBV 힙 대신 FrameResouce의 상수 버퍼 GPU 주소를 직접 넘김
-	D3D12_GPU_VIRTUAL_ADDRESS objCBAddress = mCurrFrameResource->ObjectCB->Resource()->GetGPUVirtualAddress();
-	g_commandList->SetGraphicsRootConstantBufferView(0, objCBAddress);
+	//// CBV 힙 대신 FrameResouce의 상수 버퍼 GPU 주소를 직접 넘김
+	//D3D12_GPU_VIRTUAL_ADDRESS objCBAddress = mCurrFrameResource->ObjectCB->Resource()->GetGPUVirtualAddress();
+	//g_commandList->SetGraphicsRootConstantBufferView(0, objCBAddress);
 
-	g_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
+	//g_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
+
+	UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
+	D3D12_GPU_VIRTUAL_ADDRESS objCBBase = mCurrFrameResource->ObjectCB->Resource()->GetGPUVirtualAddress();
+	
+	for (int i = 0; i < NumObjects; ++i)
+	{
+		D3D12_GPU_VIRTUAL_ADDRESS objCBAddress = objCBBase + i * objCBByteSize;			// 물체별 주소
+		g_commandList->SetGraphicsRootConstantBufferView(0, objCBAddress);
+		g_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
+	}
 
 	// 재설정을 완료했기에 다시 타입을 바꿈
 	// 렌더 대상(Render_Target) -> 표현(Present)
@@ -430,9 +444,9 @@ void Init::Draw()
 	ThrowIfFailed(g_swapChain->Present(0,0));
 	mCurrBackBuffer = (mCurrBackBuffer+1) % SwapChainBufferCount;
 
-	//FlushCommandQueue();
 	mCurrFrameResource->Fence = ++mCurrnetFence;
 	g_commandQueue->Signal(g_fence.Get(), mCurrnetFence);			// 안기다리고 바로 리턴 -> Update문에 있음....
+	//FlushCommandQueue();
 }
 
 /*
@@ -634,7 +648,24 @@ void Init::BuildFrameResources()
 {
 	for (int i = 0; i < NumFrameResources; ++i)
 	{
-		mFrameResources.push_back(std::make_unique<FrameResource>(g_device.Get(), 1));			// 물체 개수 1개
+		mFrameResources.push_back(std::make_unique<FrameResource>(g_device.Get(), NumObjects));			// 물체 개수 NumObjects개
+	}
+}
+
+void Init::BuildRenderItems()
+{
+	mObjectWorlds.resize(NumObjects);
+	mObjectThetas.resize(NumObjects);
+
+	int idx = 0;
+	for (int x = -1; x <= 1; ++x)
+	for (int y = -1; y <= 1; ++y)
+	for (int z = -1; z <= 1; ++z)
+	{
+		XMMATRIX translate = XMMatrixTranslation(x * 3.0f, y * 3.0f, z * 3.0f);			// 3칸 간격
+		XMStoreFloat4x4(&mObjectWorlds[idx], translate);
+		mObjectThetas[idx] = 0.0f;
+		idx++;
 	}
 }
 

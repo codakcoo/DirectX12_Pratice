@@ -79,6 +79,7 @@ protected:
 	void BuildRootSignature();
 	void BuildBoxGeometry();
 	void BuildFrameResources();
+	void BuildRenderItems();
 	void BuildShadersAndInputLayout();
 	void BuildPSO();
 
@@ -151,4 +152,8 @@ protected:
 	XMFLOAT4X4 mView = MathHelper::Identity4x4();
 	XMFLOAT4X4 mProj = MathHelper::Identity4x4();
 	XMFLOAT4X4 mWorld = MathHelper::Identity4x4();
+
+	static const int NumObjects = 27;				// 예: 3x3x3 격자
+	std::vector<XMFLOAT4X4> mObjectWorlds;			// 각 물체의 월드 행렬 
+	std::vector<float> mObjectThetas;				// 각 물체의 회전 속도용 각도
 };
