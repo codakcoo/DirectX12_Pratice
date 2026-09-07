@@ -273,12 +273,12 @@ bool Init::InitD3D()
 	LoadTextures();
 	BuildRootSignature();						// 루트 서명 생성
 	BuildDescriptorHeaps();						// 서술자 힙 생성
-	//BuildConstantBuffers();						// 상수 버퍼 생성
+	BuildConstantBuffers();						// 상수 버퍼 생성
 	BuildSrvHeap();								// LoadTextures() 다음에
 	BuildShadersAndInputLayout();				// 쉐이더와 입력 레이아웃 생성
 	BuildBoxGeometry();							// 박스 지오메트리 생성, 여기서 정점/인덱스 버퍼 업로드 명령 기록
 	BuildFrameResources();						// 디바이스만 있으면 되니 근처 아무데나(g_device만 있으됨)
-	//BuildRenderItems();
+	BuildRenderItems();
 	BuildPSO();									// 파이프라인 상태 객체 생성
 
 	ThrowIfFailed(g_commandList->Close());	// 명령 목록 닫기
