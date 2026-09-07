@@ -15,6 +15,7 @@
 #include "MathHelper.h"
 #include "FrameResource.h"
 #include "GeometryTypes.h"
+#include "DDSTextureLoader.h"
 
 
 using Microsoft::WRL::ComPtr;
@@ -82,6 +83,9 @@ protected:
 	void BuildRenderItems();
 	void BuildShadersAndInputLayout();
 	void BuildPSO();
+
+	void LoadTextures();
+	void BuildSrvHeap();
 
 protected:
 
@@ -156,4 +160,9 @@ protected:
 	static const int NumObjects = 27;				// 예: 3x3x3 격자
 	std::vector<XMFLOAT4X4> mObjectWorlds;			// 각 물체의 월드 행렬 
 	std::vector<float> mObjectThetas;				// 각 물체의 회전 속도용 각도
+
+	// 텍스처
+	std::unique_ptr<Texture> mBoxTex = nullptr;
+	ComPtr<ID3D12DescriptorHeap> mSrvHeap = nullptr;
+	
 };

@@ -2,6 +2,7 @@
 #include <DirectXMath.h>
 #include <wrl.h>
 #include <d3d12.h>
+#include <string>
 #include "MathHelper.h"
 #include "LightingUtil.h"
 
@@ -11,8 +12,8 @@ using Microsoft::WRL::ComPtr;
 struct Vertex
 {
 	DirectX::XMFLOAT3 Pos;
-	//DirectX::XMFLOAT4 Color;
-	DirectX::XMFLOAT3 Normal;					
+	DirectX::XMFLOAT3 Normal;
+	DirectX::XMFLOAT2 TexC;
 };
 
 struct ObjectConstants
@@ -20,6 +21,14 @@ struct ObjectConstants
 	DirectX::XMFLOAT4X4 World = MathHelper::Identity4x4();
 };
 
+struct Texture
+{
+	std::string name;
+	std::wstring Filename;
+
+	Microsoft::WRL::ComPtr<ID3D12Resource> Resource = nullptr;
+	Microsoft::WRL::ComPtr<ID3D12Resource> UploadHeap = nullptr;		// GPU 복사 끝날 때까지 살려둬야 함
+};
 
 struct PassConstants
 {

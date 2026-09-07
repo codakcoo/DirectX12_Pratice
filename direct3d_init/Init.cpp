@@ -270,13 +270,15 @@ bool Init::InitD3D()
 
 	ThrowIfFailed(g_commandList->Reset(g_commandAllocator.Get(), nullptr));	// 명령 목록 초기화)
 
-	BuildDescriptorHeaps();						// 서술자 힙 생성
-	BuildConstantBuffers();						// 상수 버퍼 생성
+	LoadTextures();
 	BuildRootSignature();						// 루트 서명 생성
+	BuildDescriptorHeaps();						// 서술자 힙 생성
+	//BuildConstantBuffers();						// 상수 버퍼 생성
+	BuildSrvHeap();								// LoadTextures() 다음에
 	BuildShadersAndInputLayout();				// 쉐이더와 입력 레이아웃 생성
 	BuildBoxGeometry();							// 박스 지오메트리 생성, 여기서 정점/인덱스 버퍼 업로드 명령 기록
 	BuildFrameResources();						// 디바이스만 있으면 되니 근처 아무데나(g_device만 있으됨)
-	BuildRenderItems();
+	//BuildRenderItems();
 	BuildPSO();									// 파이프라인 상태 객체 생성
 
 	ThrowIfFailed(g_commandList->Close());	// 명령 목록 닫기
@@ -423,8 +425,13 @@ void Init::Draw()
 
 	//g_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
 
+	ID3D12DescriptorHeap* heaps[] = { mSrvHeap.Get() };
+	g_commandList->SetDescriptorHeaps(1, heaps);
+
+	g_commandList->SetGraphicsRootDescriptorTable(0, mSrvHeap->GetGPUDescriptorHandleForHeapStart());
+
 	D3D12_GPU_VIRTUAL_ADDRESS passCBAddress = mCurrFrameResource->PassCB->Resource()->GetGPUVirtualAddress();
-	g_commandList->SetGraphicsRootConstantBufferView(1, passCBAddress);				// 슬롯 1, 프레임당 한번만
+	g_commandList->SetGraphicsRootConstantBufferView(2, passCBAddress);				// 슬롯 1, 프레임당 한번만
 
 	UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
 	D3D12_GPU_VIRTUAL_ADDRESS objCBBase = mCurrFrameResource->ObjectCB->Resource()->GetGPUVirtualAddress();
@@ -432,7 +439,7 @@ void Init::Draw()
 	for (int i = 0; i < NumObjects; ++i)
 	{
 		D3D12_GPU_VIRTUAL_ADDRESS objCBAddress = objCBBase + i * objCBByteSize;			// 물체별 주소
-		g_commandList->SetGraphicsRootConstantBufferView(0, objCBAddress);
+		g_commandList->SetGraphicsRootConstantBufferView(1, objCBAddress);
 		g_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
 	}
 
@@ -575,12 +582,23 @@ void Init::BuildDescriptorHeaps()
 
 void Init::BuildRootSignature()
 {
+	CD3DX12_DESCRIPTOR_RANGE texTable;
+	texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);		// t0,개수 1
+	
 	// cbv의 힙을 사용하지 않고 루트 디스크립터 방식으로 GPU 주소로 바로 때려박기 때문에 heap(공간), table(참조)를 안만들어도 됨.
-	CD3DX12_ROOT_PARAMETER slotRootParameter[2];
-	slotRootParameter[0].InitAsConstantBufferView(0);			// b0 - 물체별
-	slotRootParameter[1].InitAsConstantBufferView(1);			// b1 - 패스별
+	CD3DX12_ROOT_PARAMETER slotRootParameter[3];
+	slotRootParameter[0].InitAsDescriptorTable(1, &texTable, D3D12_SHADER_VISIBILITY_PIXEL);			
+	slotRootParameter[1].InitAsConstantBufferView(0);			// b0 - 물체별
+	slotRootParameter[2].InitAsConstantBufferView(1);			// b1 - 패스별
 
-	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(2, slotRootParameter, 0, nullptr, 
+	// 정적 샘플러 - 지난번 얘기한 그 방식, 별도 힙 불필요
+	CD3DX12_STATIC_SAMPLER_DESC linearWrap(
+		0, D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+		D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+		D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+		D3D12_TEXTURE_ADDRESS_MODE_WRAP);
+
+	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(3, slotRootParameter, 1, &linearWrap, 
 		D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
 	ComPtr<ID3DBlob> serializedRootSig = nullptr;
@@ -592,10 +610,8 @@ void Init::BuildRootSignature()
 		OutputDebugStringA((char*)errorBlob->GetBufferPointer());
 	ThrowIfFailed(hr);
 
-	ThrowIfFailed(g_device->CreateRootSignature(
-		0,
-		serializedRootSig->GetBufferPointer(),
-		serializedRootSig->GetBufferSize(),
+	ThrowIfFailed(g_device->CreateRootSignature(0,
+		serializedRootSig->GetBufferPointer(), serializedRootSig->GetBufferSize(),
 		IID_PPV_ARGS(&mRootSignature)));
 }
 
@@ -604,35 +620,35 @@ void Init::BuildBoxGeometry()
 	std::array<Vertex, 24> vertices =
 	{
 		// 앞면
-		Vertex({ XMFLOAT3(-1,-1,-1), XMFLOAT3(0,0,-1) }),
-		Vertex({ XMFLOAT3(-1,+1,-1), XMFLOAT3(0,0,-1) }),
-		Vertex({ XMFLOAT3(+1,+1,-1), XMFLOAT3(0,0,-1) }),
-		Vertex({ XMFLOAT3(+1,-1,-1), XMFLOAT3(0,0,-1) }),
+		Vertex({ XMFLOAT3(-1,-1,-1), XMFLOAT3(0,0,-1), XMFLOAT2(0.0f, 1.0f) }),
+		Vertex({ XMFLOAT3(-1,+1,-1), XMFLOAT3(0,0,-1), XMFLOAT2(0.0f, 0.0f) }),
+		Vertex({ XMFLOAT3(+1,+1,-1), XMFLOAT3(0,0,-1), XMFLOAT2(1.0f, 0.0f) }),
+		Vertex({ XMFLOAT3(+1,-1,-1), XMFLOAT3(0,0,-1), XMFLOAT2(1.0f, 1.0f) }),
 		// 뒷면
-		Vertex({ XMFLOAT3(-1,-1,+1), XMFLOAT3(0,0,1) }),
-		Vertex({ XMFLOAT3(+1,-1,+1), XMFLOAT3(0,0,1) }),
-		Vertex({ XMFLOAT3(+1,+1,+1), XMFLOAT3(0,0,1) }),
-		Vertex({ XMFLOAT3(-1,+1,+1), XMFLOAT3(0,0,1) }),
+		Vertex({ XMFLOAT3(-1,-1,+1), XMFLOAT3(0,0,1), XMFLOAT2(1.0f, 1.0f) }),
+		Vertex({ XMFLOAT3(+1,-1,+1), XMFLOAT3(0,0,1), XMFLOAT2(0.0f, 1.0f) }),
+		Vertex({ XMFLOAT3(+1,+1,+1), XMFLOAT3(0,0,1), XMFLOAT2(0.0f, 0.0f) }),
+		Vertex({ XMFLOAT3(-1,+1,+1), XMFLOAT3(0,0,1), XMFLOAT2(1.0f, 0.0f) }),
 		// 윗면
-		Vertex({ XMFLOAT3(-1,+1,-1), XMFLOAT3(0,1,0) }),
-		Vertex({ XMFLOAT3(-1,+1,+1), XMFLOAT3(0,1,0) }),
-		Vertex({ XMFLOAT3(+1,+1,+1), XMFLOAT3(0,1,0) }),
-		Vertex({ XMFLOAT3(+1,+1,-1), XMFLOAT3(0,1,0) }),
+		Vertex({ XMFLOAT3(-1,+1,-1), XMFLOAT3(0,1,0), XMFLOAT2(0.0f, 1.0f) }),
+		Vertex({ XMFLOAT3(-1,+1,+1), XMFLOAT3(0,1,0), XMFLOAT2(0.0f, 0.0f) }),
+		Vertex({ XMFLOAT3(+1,+1,+1), XMFLOAT3(0,1,0), XMFLOAT2(1.0f, 0.0f) }),
+		Vertex({ XMFLOAT3(+1,+1,-1), XMFLOAT3(0,1,0), XMFLOAT2(1.0f, 1.0f) }),
 		// 아랫면
-		Vertex({ XMFLOAT3(-1,-1,-1), XMFLOAT3(0,-1,0) }),
-		Vertex({ XMFLOAT3(+1,-1,-1), XMFLOAT3(0,-1,0) }),
-		Vertex({ XMFLOAT3(+1,-1,+1), XMFLOAT3(0,-1,0) }),
-		Vertex({ XMFLOAT3(-1,-1,+1), XMFLOAT3(0,-1,0) }),
+		Vertex({ XMFLOAT3(-1,-1,-1), XMFLOAT3(0,-1,0), XMFLOAT2(0.0f, 1.0f) }),
+		Vertex({ XMFLOAT3(+1,-1,-1), XMFLOAT3(0,-1,0), XMFLOAT2(0.0f, 0.0f) }),
+		Vertex({ XMFLOAT3(+1,-1,+1), XMFLOAT3(0,-1,0), XMFLOAT2(1.0f, 0.0f) }),
+		Vertex({ XMFLOAT3(-1,-1,+1), XMFLOAT3(0,-1,0), XMFLOAT2(1.0f, 1.0f) }),
 		// 왼쪽면
-		Vertex({ XMFLOAT3(-1,-1,+1), XMFLOAT3(-1,0,0) }),
-		Vertex({ XMFLOAT3(-1,+1,+1), XMFLOAT3(-1,0,0) }),
-		Vertex({ XMFLOAT3(-1,+1,-1), XMFLOAT3(-1,0,0) }),
-		Vertex({ XMFLOAT3(-1,-1,-1), XMFLOAT3(-1,0,0) }),
+		Vertex({ XMFLOAT3(-1,-1,+1), XMFLOAT3(-1,0,0), XMFLOAT2(1.0f, 1.0f) }),
+		Vertex({ XMFLOAT3(-1,+1,+1), XMFLOAT3(-1,0,0), XMFLOAT2(0.0f, 1.0f) }),
+		Vertex({ XMFLOAT3(-1,+1,-1), XMFLOAT3(-1,0,0), XMFLOAT2(0.0f, 0.0f) }),
+		Vertex({ XMFLOAT3(-1,-1,-1), XMFLOAT3(-1,0,0), XMFLOAT2(1.0f, 0.0f) }),
 		// 오른쪽면
-		Vertex({ XMFLOAT3(+1,-1,-1), XMFLOAT3(1,0,0) }),
-		Vertex({ XMFLOAT3(+1,+1,-1), XMFLOAT3(1,0,0) }),
-		Vertex({ XMFLOAT3(+1,+1,+1), XMFLOAT3(1,0,0) }),
-		Vertex({ XMFLOAT3(+1,-1,+1), XMFLOAT3(1,0,0) }),
+		Vertex({ XMFLOAT3(+1,-1,-1), XMFLOAT3(1,0,0), XMFLOAT2(0.0f, 1.0f) }),
+		Vertex({ XMFLOAT3(+1,+1,-1), XMFLOAT3(1,0,0), XMFLOAT2(0.0f, 0.0f) }),
+		Vertex({ XMFLOAT3(+1,+1,+1), XMFLOAT3(1,0,0), XMFLOAT2(1.0f, 0.0f) }),
+		Vertex({ XMFLOAT3(+1,-1,+1), XMFLOAT3(1,0,0), XMFLOAT2(1.0f, 1.0f) }),
 	};
 
 	std::array<std::uint16_t, 36> indices =
@@ -702,7 +718,8 @@ void Init::BuildShadersAndInputLayout()
 	mInputLayout =
 	{
 		{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-		{ "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(Vertex, Normal), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+		{ "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(Vertex, Normal), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(Vertex, TexC), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
 	};
 }
 
@@ -726,6 +743,43 @@ void Init::BuildPSO()
 	psoDesc.DSVFormat = mDepthStencilFormat;
 
 	ThrowIfFailed(g_device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&mPSO)));
+}
+
+/*
+* 텍스처 로드 함수는 반드시 커맨드 리스트가 열려있을 떄 호출해야 됨.
+*/
+void Init::LoadTextures()
+{
+	mBoxTex = std::make_unique<Texture>();
+	mBoxTex->name = "boxTex";
+	mBoxTex->Filename = L"Textures\\WoodCrate01.dds";		// 확보한 dds 경로/이름 맞추기
+
+	// CreateDDSTextureFromFile12가 내부 업로드 -> 디폴트 힙 복사 명령을
+	// 커맨드 리스트에 기록함.
+	ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(
+		g_device.Get(), g_commandList.Get(),
+		mBoxTex->Filename.c_str(),
+		mBoxTex->Resource, mBoxTex->UploadHeap));
+}
+
+void Init::BuildSrvHeap()
+{
+	D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
+	srvHeapDesc.NumDescriptors = 1;
+	srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+	srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;		// 필수
+	ThrowIfFailed(g_device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&mSrvHeap)));
+
+	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	srvDesc.Format = mBoxTex->Resource->GetDesc().Format;
+	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+	srvDesc.Texture2D.MostDetailedMip = 0;
+	srvDesc.Texture2D.MipLevels = mBoxTex->Resource->GetDesc().MipLevels;
+	srvDesc.Texture2D.ResourceMinLODClamp = 0.0f;
+
+	g_device->CreateShaderResourceView(mBoxTex->Resource.Get(), &srvDesc,
+		mSrvHeap->GetCPUDescriptorHandleForHeapStart());
 }
 
 
