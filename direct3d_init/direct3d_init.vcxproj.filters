@@ -59,6 +59,9 @@
     <ClInclude Include="GeometryTypes.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
+    <ClInclude Include="LightingUtil.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="Shaders\color.hlsl">

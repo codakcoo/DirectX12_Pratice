@@ -16,7 +16,7 @@
 struct FrameResource
 {
 public:
-	FrameResource(ID3D12Device* device, UINT objectCount);
+	FrameResource(ID3D12Device* device, UINT passCount, UINT objectCount);
 	FrameResource(const FrameResource& rhs) = delete;
 	FrameResource& operator=(const FrameResource& rhs) = delete;
 	~FrameResource() = default;
@@ -25,6 +25,7 @@ public:
 	// CPU는 프레임 N용 얼로케이터에 안전하게 기록 가능
 	ComPtr<ID3D12CommandAllocator> CmdListAlloc;
 
+	std::unique_ptr<UploadBuffer<PassConstants>> PassCB = nullptr;
 	// 프레임마다 독립된 상수 버퍼 - 마찬가지 이유
 	std::unique_ptr<UploadBuffer<ObjectConstants>> ObjectCB = nullptr;
 

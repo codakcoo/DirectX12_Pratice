@@ -310,25 +310,29 @@ void Init::Update(const GameTimer& gt)
 	XMVECTOR target = XMVectorZero();									// 원점
 	XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);		// y축이 위쪽
 	XMMATRIX view = XMMatrixLookAtLH(pos, target, up);
-	XMStoreFloat4x4(&mView, view);
-	// 투영 행렬
-	XMMATRIX proj = XMMatrixPerspectiveFovLH(0.25f * XM_PI, (float)mClientWidth / mClientHeight, 1.0f, 1000.0f);
+	XMMATRIX proj = XMMatrixPerspectiveFovLH(0.25f * XM_PI, (float)mClientWidth / mClientHeight, 1.0f, 1000.0f);	// 투영 행렬
+	XMMATRIX viewProj = view * proj;
+
+	PassConstants passCB;
+	XMStoreFloat4x4(&passCB.ViewProj, XMMatrixTranspose(viewProj));
+	XMStoreFloat3(&passCB.EyePosW, pos);
+	passCB.AmbientLight = { 0.25f, 0.25f, 0.35f, 1.0f };
+
+	passCB.Lights[0].Direction = { 0.57735f, -0.57735f, 0.57735f };
+	passCB.Lights[0].Strength = { 0.8f, 0.8f, 0.7f };
+
+	mCurrFrameResource->PassCB->CopyData(0, passCB);						// 패스는 슬롯 1개
 
 	// 물체마다 개별 계산해서 각자의 슬롯(index)에 복사
 	for (int i = 0; i < NumObjects; ++i)
 	{
 		mObjectThetas[i] += gt.DeltaTime() * (1.0f + i * 0.1f);					// 물체마다 속도 다르게
-
 		XMMATRIX baseTranslate = XMLoadFloat4x4(&mObjectWorlds[i]);
 		XMMATRIX spin = XMMatrixRotationY(mObjectThetas[i]);
 		XMMATRIX world = spin * baseTranslate;									// 자전 후 배치 위치로 이동
 
-		// 세 행렬을 합쳐서 상수 버퍼에 갱신
-		XMMATRIX worldViewProj = world * view * proj;
-
 		ObjectConstants objConstants;
-		XMStoreFloat4x4(&objConstants.World, XMMatrixTranspose(worldViewProj));	// HLSL은 행우선이므로 전치행렬로 변환
-		
+		XMStoreFloat4x4(&objConstants.World, XMMatrixTranspose(world));	// HLSL은 행우선이므로 전치행렬로 변환
 		mCurrFrameResource->ObjectCB->CopyData(i, objConstants);	// i번 슬롯에 상수 버퍼에 복사
 	}
 }
@@ -418,6 +422,9 @@ void Init::Draw()
 	//g_commandList->SetGraphicsRootConstantBufferView(0, objCBAddress);
 
 	//g_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
+
+	D3D12_GPU_VIRTUAL_ADDRESS passCBAddress = mCurrFrameResource->PassCB->Resource()->GetGPUVirtualAddress();
+	g_commandList->SetGraphicsRootConstantBufferView(1, passCBAddress);				// 슬롯 1, 프레임당 한번만
 
 	UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
 	D3D12_GPU_VIRTUAL_ADDRESS objCBBase = mCurrFrameResource->ObjectCB->Resource()->GetGPUVirtualAddress();
@@ -569,10 +576,11 @@ void Init::BuildDescriptorHeaps()
 void Init::BuildRootSignature()
 {
 	// cbv의 힙을 사용하지 않고 루트 디스크립터 방식으로 GPU 주소로 바로 때려박기 때문에 heap(공간), table(참조)를 안만들어도 됨.
-	CD3DX12_ROOT_PARAMETER slotRootParameter[1];
-	slotRootParameter[0].InitAsConstantBufferView(0);			// b0, 루트 디스크립터
+	CD3DX12_ROOT_PARAMETER slotRootParameter[2];
+	slotRootParameter[0].InitAsConstantBufferView(0);			// b0 - 물체별
+	slotRootParameter[1].InitAsConstantBufferView(1);			// b1 - 패스별
 
-	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(1, slotRootParameter, 0, nullptr, 
+	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(2, slotRootParameter, 0, nullptr, 
 		D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
 	ComPtr<ID3DBlob> serializedRootSig = nullptr;
@@ -593,31 +601,48 @@ void Init::BuildRootSignature()
 
 void Init::BuildBoxGeometry()
 {
-	std::array<Vertex, 8> vertices =
-	{
-		Vertex({ XMFLOAT3(-1.0f, -1.0f, -1.0f), XMFLOAT4(Colors::White) }),
-		Vertex({ XMFLOAT3(-1.0f, +1.0f, -1.0f), XMFLOAT4(Colors::Black) }),
-		Vertex({ XMFLOAT3(+1.0f, +1.0f, -1.0f), XMFLOAT4(Colors::Red) }),
-		Vertex({ XMFLOAT3(+1.0f, -1.0f, -1.0f), XMFLOAT4(Colors::Green) }),
-		Vertex({ XMFLOAT3(-1.0f, -1.0f, +1.0f), XMFLOAT4(Colors::Blue) }),
-		Vertex({ XMFLOAT3(-1.0f, +1.0f, +1.0f), XMFLOAT4(Colors::Yellow) }),
-		Vertex({ XMFLOAT3(+1.0f, +1.0f, +1.0f), XMFLOAT4(Colors::Cyan) }),
-		Vertex({ XMFLOAT3(+1.0f, -1.0f, +1.0f), XMFLOAT4(Colors::Magenta) }),
-	};
-	std::array<std::uint16_t, 36> indices =
+	std::array<Vertex, 24> vertices =
 	{
 		// 앞면
-		0, 1, 2,  0, 2, 3,
+		Vertex({ XMFLOAT3(-1,-1,-1), XMFLOAT3(0,0,-1) }),
+		Vertex({ XMFLOAT3(-1,+1,-1), XMFLOAT3(0,0,-1) }),
+		Vertex({ XMFLOAT3(+1,+1,-1), XMFLOAT3(0,0,-1) }),
+		Vertex({ XMFLOAT3(+1,-1,-1), XMFLOAT3(0,0,-1) }),
 		// 뒷면
-		4, 6, 5,  4, 7, 6,
-		// 왼쪽
-		4, 5, 1,  4, 1, 0,
-		// 오른쪽
-		3, 2, 6,  3, 6, 7,
+		Vertex({ XMFLOAT3(-1,-1,+1), XMFLOAT3(0,0,1) }),
+		Vertex({ XMFLOAT3(+1,-1,+1), XMFLOAT3(0,0,1) }),
+		Vertex({ XMFLOAT3(+1,+1,+1), XMFLOAT3(0,0,1) }),
+		Vertex({ XMFLOAT3(-1,+1,+1), XMFLOAT3(0,0,1) }),
 		// 윗면
-		1, 5, 6,  1, 6, 2,
+		Vertex({ XMFLOAT3(-1,+1,-1), XMFLOAT3(0,1,0) }),
+		Vertex({ XMFLOAT3(-1,+1,+1), XMFLOAT3(0,1,0) }),
+		Vertex({ XMFLOAT3(+1,+1,+1), XMFLOAT3(0,1,0) }),
+		Vertex({ XMFLOAT3(+1,+1,-1), XMFLOAT3(0,1,0) }),
 		// 아랫면
-		4, 0, 3,  4, 3, 7
+		Vertex({ XMFLOAT3(-1,-1,-1), XMFLOAT3(0,-1,0) }),
+		Vertex({ XMFLOAT3(+1,-1,-1), XMFLOAT3(0,-1,0) }),
+		Vertex({ XMFLOAT3(+1,-1,+1), XMFLOAT3(0,-1,0) }),
+		Vertex({ XMFLOAT3(-1,-1,+1), XMFLOAT3(0,-1,0) }),
+		// 왼쪽면
+		Vertex({ XMFLOAT3(-1,-1,+1), XMFLOAT3(-1,0,0) }),
+		Vertex({ XMFLOAT3(-1,+1,+1), XMFLOAT3(-1,0,0) }),
+		Vertex({ XMFLOAT3(-1,+1,-1), XMFLOAT3(-1,0,0) }),
+		Vertex({ XMFLOAT3(-1,-1,-1), XMFLOAT3(-1,0,0) }),
+		// 오른쪽면
+		Vertex({ XMFLOAT3(+1,-1,-1), XMFLOAT3(1,0,0) }),
+		Vertex({ XMFLOAT3(+1,+1,-1), XMFLOAT3(1,0,0) }),
+		Vertex({ XMFLOAT3(+1,+1,+1), XMFLOAT3(1,0,0) }),
+		Vertex({ XMFLOAT3(+1,-1,+1), XMFLOAT3(1,0,0) }),
+	};
+
+	std::array<std::uint16_t, 36> indices =
+	{
+		0,1,2, 0,2,3,       // 앞
+		4,5,6, 4,6,7,       // 뒤
+		8,9,10, 8,10,11,    // 위
+		12,13,14, 12,14,15, // 아래
+		16,17,18, 16,18,19, // 왼쪽
+		20,21,22, 20,22,23  // 오른쪽
 	};
 
 	const UINT vbByteSize = (UINT)vertices.size() * sizeof(Vertex);
@@ -648,7 +673,7 @@ void Init::BuildFrameResources()
 {
 	for (int i = 0; i < NumFrameResources; ++i)
 	{
-		mFrameResources.push_back(std::make_unique<FrameResource>(g_device.Get(), NumObjects));			// 물체 개수 NumObjects개
+		mFrameResources.push_back(std::make_unique<FrameResource>(g_device.Get(), 1, NumObjects));			// 물체 개수 NumObjects개
 	}
 }
 
@@ -677,7 +702,7 @@ void Init::BuildShadersAndInputLayout()
 	mInputLayout =
 	{
 		{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-		{ "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+		{ "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(Vertex, Normal), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
 	};
 }
 

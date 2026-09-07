@@ -3,6 +3,7 @@
 #include <wrl.h>
 #include <d3d12.h>
 #include "MathHelper.h"
+#include "LightingUtil.h"
 
 
 using Microsoft::WRL::ComPtr;
@@ -10,12 +11,24 @@ using Microsoft::WRL::ComPtr;
 struct Vertex
 {
 	DirectX::XMFLOAT3 Pos;
-	DirectX::XMFLOAT4 Color;
+	//DirectX::XMFLOAT4 Color;
+	DirectX::XMFLOAT3 Normal;					
 };
 
 struct ObjectConstants
 {
 	DirectX::XMFLOAT4X4 World = MathHelper::Identity4x4();
+};
+
+
+struct PassConstants
+{
+	DirectX::XMFLOAT4X4 ViewProj = MathHelper::Identity4x4();
+	DirectX::XMFLOAT3 EyePosW = { 0.0f, 0.0f, 0.0f };
+	float cbPerObjectPad1 = 0.0f;
+	DirectX::XMFLOAT4 AmbientLight = { 0.25f, 0.25f, 0.35f, 1.0f };
+
+	Light Lights[MaxLights];
 };
 
 struct MeshGeometry

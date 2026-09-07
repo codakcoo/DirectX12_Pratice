@@ -137,6 +137,7 @@
     <ClInclude Include="GameTimer.h" />
     <ClInclude Include="GeometryTypes.h" />
     <ClInclude Include="Init.h" />
+    <ClInclude Include="LightingUtil.h" />
     <ClInclude Include="MathHelper.h" />
     <ClInclude Include="UploadBuffer.h" />
   </ItemGroup>
