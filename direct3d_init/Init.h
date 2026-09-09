@@ -79,6 +79,7 @@ protected:
 	void BuildDescriptorHeaps();
 	void BuildRootSignature();
 	void BuildBoxGeometry();
+	void BuildFloorGeometry();
 	void BuildFrameResources();
 	void BuildRenderItems();
 	void BuildShadersAndInputLayout();
@@ -157,7 +158,7 @@ protected:
 	XMFLOAT4X4 mProj = MathHelper::Identity4x4();
 	XMFLOAT4X4 mWorld = MathHelper::Identity4x4();
 
-	static const int NumObjects = 27;				// 예: 3x3x3 격자
+	static const int NumObjects = 29;				// 예: 3x3x3 격자 큐브 27개, 바닥 1개, 반사 큐브 1개
 	std::vector<XMFLOAT4X4> mObjectWorlds;			// 각 물체의 월드 행렬 
 	std::vector<float> mObjectThetas;				// 각 물체의 회전 속도용 각도
 
@@ -169,4 +170,8 @@ protected:
 	std::vector<bool> mObjectTransparent;
 	ComPtr<ID3D12PipelineState> mTransparentPSO = nullptr;
 	
+	// 반사
+	std::unique_ptr<MeshGeometry> mFloorGeo = nullptr;
+	ComPtr<ID3D12PipelineState> mMarkStencilPSO = nullptr;				// 바닥에 스텐실 마킹
+	ComPtr<ID3D12PipelineState> mReflectionPSO = nullptr;				// 반사 큐브 (스텐실 통과한 곳만)
 };
