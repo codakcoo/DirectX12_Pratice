@@ -385,7 +385,7 @@ void Init::Draw()
 	auto cmdListAlloc = mCurrFrameResource->CmdListAlloc;			// FrameResource의 얼로케이터
 
 	ThrowIfFailed(cmdListAlloc->Reset());							// FrameResource에 있는 얼로케이터를 Reset
-	ThrowIfFailed(g_commandList->Reset(cmdListAlloc.Get(), mPSO.Get()));
+	ThrowIfFailed(g_commandList->Reset(cmdListAlloc.Get(), mOpaquePSO.Get()));
 
 	// 재설정하기 위해 타입을 변경함.
 	// 표현(Present) -> 렌더 대상(Render_Target)
@@ -408,7 +408,7 @@ void Init::Draw()
 	auto dsv = DepthStencilView();
 	g_commandList->OMSetRenderTargets(1, &rtv, true, &dsv);
 
-	g_commandList->SetPipelineState(mPSO.Get());
+	g_commandList->SetPipelineState(mOpaquePSO.Get());
 	g_commandList->SetGraphicsRootSignature(mRootSignature.Get());
 
 
@@ -436,8 +436,21 @@ void Init::Draw()
 	UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
 	D3D12_GPU_VIRTUAL_ADDRESS objCBBase = mCurrFrameResource->ObjectCB->Resource()->GetGPUVirtualAddress();
 	
+	// 불투명 먼저
+	g_commandList->SetPipelineState(mOpaquePSO.Get());
 	for (int i = 0; i < NumObjects; ++i)
 	{
+		if (mObjectTransparent[i]) continue;
+		D3D12_GPU_VIRTUAL_ADDRESS objCBAddress = objCBBase + i * objCBByteSize;			// 물체별 주소
+		g_commandList->SetGraphicsRootConstantBufferView(1, objCBAddress);
+		g_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
+	}
+
+	// 반투명 나중
+	g_commandList->SetPipelineState(mTransparentPSO.Get());
+	for (int i = 0; i < NumObjects; ++i)
+	{
+		if (!mObjectTransparent[i]) continue;
 		D3D12_GPU_VIRTUAL_ADDRESS objCBAddress = objCBBase + i * objCBByteSize;			// 물체별 주소
 		g_commandList->SetGraphicsRootConstantBufferView(1, objCBAddress);
 		g_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
@@ -697,6 +710,9 @@ void Init::BuildRenderItems()
 {
 	mObjectWorlds.resize(NumObjects);
 	mObjectThetas.resize(NumObjects);
+	mObjectTransparent.resize(NumObjects);
+	for (int i = 0; i < NumObjects; ++i)
+		mObjectTransparent[i] = (i % 3 == 0);			// 세 개 중 하나는 반투명
 
 	int idx = 0;
 	for (int x = -1; x <= 1; ++x)
@@ -725,24 +741,43 @@ void Init::BuildShadersAndInputLayout()
 
 void Init::BuildPSO()
 {
-	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
-	psoDesc.InputLayout = { mInputLayout.data(), (UINT)mInputLayout.size() };
-	psoDesc.pRootSignature = mRootSignature.Get();
-	psoDesc.VS = { reinterpret_cast<BYTE*>(mvsByteCode->GetBufferPointer()), mvsByteCode->GetBufferSize() };
-	psoDesc.PS = { reinterpret_cast<BYTE*>(mpsByteCode->GetBufferPointer()), mpsByteCode->GetBufferSize() };
-	psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
-	psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;	// 뒷면 제거
-	psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-	psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
-	psoDesc.SampleMask = UINT_MAX;
-	psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-	psoDesc.NumRenderTargets = 1;
-	psoDesc.RTVFormats[0] = mBackBufferFormat;
-	psoDesc.SampleDesc.Count = m4xMsaaState ? 4 : 1;
-	psoDesc.SampleDesc.Quality = m4xMsaaState ? (m4xMsaaQuality - 1) : 0;
-	psoDesc.DSVFormat = mDepthStencilFormat;
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC opaquePsoDesc = {};
+	opaquePsoDesc.InputLayout = { mInputLayout.data(), (UINT)mInputLayout.size() };
+	opaquePsoDesc.pRootSignature = mRootSignature.Get();
+	opaquePsoDesc.VS = { reinterpret_cast<BYTE*>(mvsByteCode->GetBufferPointer()), mvsByteCode->GetBufferSize() };
+	opaquePsoDesc.PS = { reinterpret_cast<BYTE*>(mpsByteCode->GetBufferPointer()), mpsByteCode->GetBufferSize() };
+	opaquePsoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+	opaquePsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;	// 뒷면 제거
+	opaquePsoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+	opaquePsoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+	opaquePsoDesc.SampleMask = UINT_MAX;
+	opaquePsoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	opaquePsoDesc.NumRenderTargets = 1;
+	opaquePsoDesc.RTVFormats[0] = mBackBufferFormat;
+	opaquePsoDesc.SampleDesc.Count = m4xMsaaState ? 4 : 1;
+	opaquePsoDesc.SampleDesc.Quality = m4xMsaaState ? (m4xMsaaQuality - 1) : 0;
+	opaquePsoDesc.DSVFormat = mDepthStencilFormat;
 
-	ThrowIfFailed(g_device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&mPSO)));
+	ThrowIfFailed(g_device->CreateGraphicsPipelineState(&opaquePsoDesc, IID_PPV_ARGS(&mOpaquePSO)));
+
+
+	// 반투명 PSO - 위 설정을 복사해서 블렌드만 교체
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC transparentPsoDesc = opaquePsoDesc;
+	
+	D3D12_RENDER_TARGET_BLEND_DESC transparentBlendDesc = {};
+	transparentBlendDesc.BlendEnable = true;
+	transparentBlendDesc.LogicOpEnable = false;
+	transparentBlendDesc.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+	transparentBlendDesc.DestBlend = D3D12_BLEND_INV_SRC1_ALPHA;
+	transparentBlendDesc.BlendOp = D3D12_BLEND_OP_ADD;
+	transparentBlendDesc.SrcBlendAlpha = D3D12_BLEND_ONE;
+	transparentBlendDesc.DestBlendAlpha = D3D12_BLEND_ZERO;
+	transparentBlendDesc.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+	transparentBlendDesc.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+	transparentPsoDesc.BlendState.RenderTarget[0] = transparentBlendDesc;
+
+	ThrowIfFailed(g_device->CreateGraphicsPipelineState(&transparentPsoDesc, IID_PPV_ARGS(&mTransparentPSO)));
 }
 
 /*

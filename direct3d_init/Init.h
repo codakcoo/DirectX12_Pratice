@@ -133,7 +133,7 @@ protected:
 	GameTimer mTimer;
 
 	ComPtr<ID3D12RootSignature> mRootSignature = nullptr;
-	ComPtr<ID3D12PipelineState> mPSO = nullptr;
+	ComPtr<ID3D12PipelineState> mOpaquePSO = nullptr;
 
 	ComPtr<ID3D10Blob> mvsByteCode;
 	ComPtr<ID3D10Blob> mpsByteCode;
@@ -164,5 +164,9 @@ protected:
 	// 텍스처
 	std::unique_ptr<Texture> mBoxTex = nullptr;
 	ComPtr<ID3D12DescriptorHeap> mSrvHeap = nullptr;
+
+	// 블렌딩
+	std::vector<bool> mObjectTransparent;
+	ComPtr<ID3D12PipelineState> mTransparentPSO = nullptr;
 	
 };
