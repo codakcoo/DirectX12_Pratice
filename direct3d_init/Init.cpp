@@ -281,6 +281,10 @@ bool Init::InitD3D()
 	BuildFrameResources();						// 디바이스만 있으면 되니 근처 아무데나(g_device만 있으됨)
 	BuildRenderItems();
 	BuildPSO();									// 파이프라인 상태 객체 생성
+	
+	BuildComputeRootSignature();				// Compute 루트 서명 생성
+	BuildComputePSO();
+	RunComputeTest();
 
 	ThrowIfFailed(g_commandList->Close());	// 명령 목록 닫기
 	ID3D12CommandList* cmdsLists[] = { g_commandList.Get() };
@@ -680,6 +684,29 @@ void Init::BuildRootSignature()
 		IID_PPV_ARGS(&mRootSignature)));
 }
 
+void Init::BuildComputeRootSignature()
+{
+	CD3DX12_ROOT_PARAMETER slotRootParameter[2];
+	slotRootParameter[0].InitAsShaderResourceView(0);			// t0 - 입력 SRV
+	slotRootParameter[1].InitAsUnorderedAccessView(0);			// u0 - 출력 UAV
+
+	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(2, slotRootParameter, 0, nullptr,
+		D3D12_ROOT_SIGNATURE_FLAG_NONE);
+
+	ComPtr<ID3D10Blob> serializedRootSig = nullptr;
+	ComPtr<ID3D10Blob> errorBlob = nullptr;
+	HRESULT hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
+		serializedRootSig.GetAddressOf(), errorBlob.GetAddressOf());
+
+	if(errorBlob != nullptr)
+		OutputDebugStringA((char*)errorBlob->GetBufferPointer());
+	ThrowIfFailed(hr);
+
+	ThrowIfFailed(g_device->CreateRootSignature(0,
+		serializedRootSig->GetBufferPointer(), serializedRootSig->GetBufferSize(),
+		IID_PPV_ARGS(&mComputeRootSignature)));
+}
+
 void Init::BuildBoxGeometry()
 {
 	std::array<Vertex, 24> vertices =
@@ -913,6 +940,21 @@ void Init::BuildPSO()
 	ThrowIfFailed(g_device->CreateGraphicsPipelineState(&reflectPsoDesc, IID_PPV_ARGS(&mReflectionPSO)));
 }
 
+void Init::BuildComputePSO()
+{
+	mComputeByteCode = d3dUtil::CompileShader(L"Shaders\\compute.hlsl", nullptr, "CS", "cs_5_0");
+
+	D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
+	computePsoDesc.pRootSignature = mComputeRootSignature.Get();
+	computePsoDesc.CS = {
+		reinterpret_cast<BYTE*>(mComputeByteCode->GetBufferPointer()),
+		mComputeByteCode->GetBufferSize()
+	};
+	computePsoDesc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
+
+	ThrowIfFailed(g_device->CreateComputePipelineState(&computePsoDesc, IID_PPV_ARGS(&mComputePSO)));
+}
+
 /*
 * 텍스처 로드 함수는 반드시 커맨드 리스트가 열려있을 떄 호출해야 됨.
 */
@@ -948,6 +990,77 @@ void Init::BuildSrvHeap()
 
 	g_device->CreateShaderResourceView(mBoxTex->Resource.Get(), &srvDesc,
 		mSrvHeap->GetCPUDescriptorHandleForHeapStart());
+}
+
+void Init::RunComputeTest()
+{
+	const int numElements = 128;
+	const UINT byteSize = numElements * sizeof(float);
+
+	// 입력 데이터 준비 (1, 2, 3, ... 128)
+	std::vector<float> inputData(numElements);
+	for(int i = 0; i < numElements; ++i)
+		inputData[i] = (float)(i + 1);
+
+	// (1) 입력 버퍼 - DEFAULT 힙 + 업로드
+	mInputBuffer = d3dUtil::CreateDefaultBuffer(
+		g_device.Get(), g_commandList.Get(),
+		inputData.data(), byteSize, mInputUploadBuffer);
+
+	// (2) 출력 버퍼 - DEFAULT 힙 + UAV 플래그
+	auto defaultHeap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+	auto outputDesc = CD3DX12_RESOURCE_DESC::Buffer(byteSize,
+		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);		// <- UAV 플래그 필수
+	ThrowIfFailed(g_device->CreateCommittedResource(
+		&defaultHeap, D3D12_HEAP_FLAG_NONE, &outputDesc,
+		D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+		IID_PPV_ARGS(&mOutputBuffer)));
+
+	// (3) readback 버퍼 - READBACK 힙 (CPU가 읽기)
+	auto readbackHeap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_READBACK);
+	auto readbackDesc = CD3DX12_RESOURCE_DESC::Buffer(byteSize);
+	ThrowIfFailed(g_device->CreateCommittedResource(
+		&readbackHeap, D3D12_HEAP_FLAG_NONE, &readbackDesc,
+		D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+		IID_PPV_ARGS(&mReadbackBuffer)));
+
+	// -- 컴퓨트 실행 --
+	g_commandList->SetPipelineState(mComputePSO.Get());
+	g_commandList->SetComputeRootSignature(mComputeRootSignature.Get());		// Compute!
+
+	g_commandList->SetComputeRootShaderResourceView(0, mInputBuffer->GetGPUVirtualAddress());
+	g_commandList->SetComputeRootUnorderedAccessView(1, mOutputBuffer->GetGPUVirtualAddress());
+
+	int numGroups = numElements / 64;		// 128 / 64 = 2 그룹
+	g_commandList->Dispatch(numGroups, 1, 1);
+
+	// 출력 버퍼 -> readback 버퍼 복사
+	auto toCopySrc = CD3DX12_RESOURCE_BARRIER::Transition(mOutputBuffer.Get(),
+		D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+	g_commandList->ResourceBarrier(1, &toCopySrc);
+
+	g_commandList->CopyResource(mReadbackBuffer.Get(), mOutputBuffer.Get());
+
+	// -- 명령 실행 후 대기 --
+	ThrowIfFailed(g_commandList->Close());
+	ID3D12CommandList* cmdsLists[] = { g_commandList.Get() };
+	g_commandQueue->ExecuteCommandLists(_countof(cmdsLists), cmdsLists);
+	FlushCommandQueue();			// GPU 계산 끌날 때까지 대기
+
+	// --결과 읽기--
+	float* mappedData = nullptr;
+	ThrowIfFailed(mReadbackBuffer->Map(0, nullptr, reinterpret_cast<void**>(&mappedData)));
+
+	OutputDebugStringA("===== Compute Test Result =====\n");
+	for (int i = 0; i < numElements; ++i)
+	{
+		std::string line = std::to_string(inputData[i]) + " -> " + std::to_string(mappedData[i]) + "\n";
+		OutputDebugStringA(line.c_str());
+	}
+	mReadbackBuffer->Unmap(0, nullptr);
+
+	// 다음 작업을 위해 커맨드 리스트 다시 읽기
+	ThrowIfFailed(g_commandList->Reset(g_commandAllocator.Get(), nullptr));
 }
 
 

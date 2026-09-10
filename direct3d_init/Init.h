@@ -77,16 +77,20 @@ protected:
 
 	void BuildConstantBuffers();
 	void BuildDescriptorHeaps();
-	void BuildRootSignature();
+	void BuildRootSignature();						// 컬러 셰이더 레이아웃 빌드
+	void BuildComputeRootSignature();				// 컴퓨트 셰이더 레이아웃 빌드
 	void BuildBoxGeometry();
 	void BuildFloorGeometry();
 	void BuildFrameResources();
 	void BuildRenderItems();
 	void BuildShadersAndInputLayout();
 	void BuildPSO();
+	void BuildComputePSO();
 
 	void LoadTextures();
 	void BuildSrvHeap();
+
+	void RunComputeTest();
 
 protected:
 
@@ -174,4 +178,14 @@ protected:
 	std::unique_ptr<MeshGeometry> mFloorGeo = nullptr;
 	ComPtr<ID3D12PipelineState> mMarkStencilPSO = nullptr;				// 바닥에 스텐실 마킹
 	ComPtr<ID3D12PipelineState> mReflectionPSO = nullptr;				// 반사 큐브 (스텐실 통과한 곳만)
+
+	// 컴퓨트
+	ComPtr<ID3D12RootSignature> mComputeRootSignature = nullptr;
+	ComPtr<ID3D12PipelineState> mComputePSO = nullptr;
+	ComPtr<ID3D10Blob> mComputeByteCode = nullptr;
+
+	ComPtr<ID3D12Resource> mInputBuffer = nullptr;
+	ComPtr<ID3D12Resource> mInputUploadBuffer = nullptr;
+	ComPtr<ID3D12Resource> mOutputBuffer = nullptr;
+	ComPtr<ID3D12Resource> mReadbackBuffer = nullptr;
 };
