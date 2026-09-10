@@ -30,6 +30,12 @@ struct Texture
 	Microsoft::WRL::ComPtr<ID3D12Resource> UploadHeap = nullptr;		// GPU 복사 끝날 때까지 살려둬야 함
 };
 
+struct BlurSettings
+{
+	int BlurRadius;
+	float w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10;
+};
+
 struct PassConstants
 {
 	DirectX::XMFLOAT4X4 ViewProj = MathHelper::Identity4x4();

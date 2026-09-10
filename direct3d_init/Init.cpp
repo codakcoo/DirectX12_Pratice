@@ -817,6 +817,31 @@ void Init::BuildFrameResources()
 	}
 }
 
+void Init::BuildBlurResources()
+{
+	auto texDesc = mBoxTex->Resource->GetDesc();		// 원본과 같은 크기/포맷
+
+	D3D12_RESOURCE_DESC blurTexDesc = {};
+	blurTexDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+	blurTexDesc.Width = texDesc.Width;
+	blurTexDesc.Height = texDesc.Height;
+	blurTexDesc.DepthOrArraySize = 1;
+	blurTexDesc.MipLevels = 1;
+	blurTexDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;		// UAV 지원 포맷
+	blurTexDesc.SampleDesc.Count = 1;
+	blurTexDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;		// UAV 필수
+
+	auto defaultHeap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+
+	ThrowIfFailed(g_device->CreateCommittedResource(
+		&defaultHeap, D3D12_HEAP_FLAG_NONE, &blurTexDesc,
+		D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&mBlurMap0)));
+
+	ThrowIfFailed(g_device->CreateCommittedResource(
+		&defaultHeap, D3D12_HEAP_FLAG_NONE, &blurTexDesc,
+		D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&mBlurMap1)));
+}
+
 void Init::BuildRenderItems()
 {
 	mObjectWorlds.resize(NumObjects);
@@ -1061,6 +1086,32 @@ void Init::RunComputeTest()
 
 	// 다음 작업을 위해 커맨드 리스트 다시 읽기
 	ThrowIfFailed(g_commandList->Reset(g_commandAllocator.Get(), nullptr));
+}
+
+// sigma가 클수록 더 흐려짐
+// sigma = 2.5f 정도로 시작하면 반경 5짜리 적당한 블러가 나옴
+std::vector<float> Init::CalcGaussWeights(float sigma)
+{
+	float twoSigma2 = 2.0f * sigma * sigma;			// 2 * sigma^2
+	int blurRadius = (int)ceil(2.0f * sigma);		// 보통 반경 = 2*sigma
+
+	assert(blurRadius <= 5);						// gMaxBlurRadius = 5
+
+	std::vector<float> weights(2 * blurRadius + 1);
+	float weightSum = 0.0f;
+
+	for (int i = -blurRadius; i <= blurRadius; ++i)
+	{
+		float x = (float)i;
+		weights[i + blurRadius] = expf(-x*x / twoSigma2);
+		weightSum += weights[i + blurRadius];
+	}
+
+	// 합이 1이 되도록 정규화 (안하면 이미자가 밝아지거나 어두워짐)
+	for(int i = 0; i < weights.size(); ++i)
+		weights[i] /= weightSum;
+
+	return std::vector<float>();
 }
 
 

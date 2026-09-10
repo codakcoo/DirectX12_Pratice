@@ -82,6 +82,7 @@ protected:
 	void BuildBoxGeometry();
 	void BuildFloorGeometry();
 	void BuildFrameResources();
+	void BuildBlurResources();
 	void BuildRenderItems();
 	void BuildShadersAndInputLayout();
 	void BuildPSO();
@@ -91,6 +92,7 @@ protected:
 	void BuildSrvHeap();
 
 	void RunComputeTest();
+	std::vector<float> CalcGaussWeights(float sigma);
 
 protected:
 
@@ -188,4 +190,7 @@ protected:
 	ComPtr<ID3D12Resource> mInputUploadBuffer = nullptr;
 	ComPtr<ID3D12Resource> mOutputBuffer = nullptr;
 	ComPtr<ID3D12Resource> mReadbackBuffer = nullptr;
+
+	ComPtr<ID3D12Resource> mBlurMap0 = nullptr;		// 텍스처A
+	ComPtr<ID3D12Resource> mBlurMap1 = nullptr;		// 텍스처B
 };
