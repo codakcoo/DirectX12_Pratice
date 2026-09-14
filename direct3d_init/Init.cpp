@@ -413,57 +413,46 @@ void Init::Draw()
 	ThrowIfFailed(cmdListAlloc->Reset());							// FrameResource에 있는 얼로케이터를 Reset
 	ThrowIfFailed(g_commandList->Reset(cmdListAlloc.Get(), mOpaquePSO.Get()));
 
-	// 재설정하기 위해 타입을 변경함.
-	// 표현(Present) -> 렌더 대상(Render_Target)
+	g_commandList->RSSetViewports(1, &mScreenViewport);
+	g_commandList->RSSetScissorRects(1, &mScissorRect);
+
+	// -- (A) 오프스크린 텍스처를 덴더 타켓 상태로 전이 --
 	auto toRT = CD3DX12_RESOURCE_BARRIER::Transition(
 		CurrentBackBuffer(),
-		D3D12_RESOURCE_STATE_PRESENT,
+		D3D12_RESOURCE_STATE_COMMON,
 		D3D12_RESOURCE_STATE_RENDER_TARGET);
 	g_commandList->ResourceBarrier(1, &toRT);
 
-	// 명령대기를 재설정(Reset)했기에 뷰포트, 가위를 재설정
-	g_commandList->RSSetViewports(1, &mScreenViewport);
-	g_commandList->RSSetScissorRects(1, &mScissorRect);
+	// -- (B) 오프스크린을 렌더 타켓으로 설정하고 씬 그리기 --
+	auto offscreenRtv = OffscreenRtv();
+	auto dsv = DepthStencilView();
 
 	const float clearColor[] = { 0.68f, 0.77f, 0.87f, 1.0f };			// LightSteelBlue
 	g_commandList->ClearRenderTargetView(CurrentBackBufferView(), clearColor, 0, nullptr);
 	g_commandList->ClearDepthStencilView(DepthStencilView(),
 		D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
 
-	auto rtv = CurrentBackBufferView();
-	auto dsv = DepthStencilView();
-	g_commandList->OMSetRenderTargets(1, &rtv, true, &dsv);
+	g_commandList->OMSetRenderTargets(1, &offscreenRtv, true, &dsv);		// <- 백버퍼 아님!
 
-	g_commandList->SetPipelineState(mOpaquePSO.Get());
 	g_commandList->SetGraphicsRootSignature(mRootSignature.Get());
 
+	ID3D12DescriptorHeap* heaps[] = { mSrvHeap.Get() };
+	g_commandList->SetDescriptorHeaps(1, heaps);
+	g_commandList->SetGraphicsRootDescriptorTable(0, mSrvHeap->GetGPUDescriptorHandleForHeapStart());
 
+	D3D12_GPU_VIRTUAL_ADDRESS passCBAddress = mCurrFrameResource->PassCB->Resource()->GetGPUVirtualAddress();
+	g_commandList->SetGraphicsRootConstantBufferView(2, passCBAddress);				// 슬롯 1, 프레임당 한번만
+	
+	UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
+	D3D12_GPU_VIRTUAL_ADDRESS objCBBase = mCurrFrameResource->ObjectCB->Resource()->GetGPUVirtualAddress();
 
+	// 큐브들 그리기 (기존 그대로  불투명/반투명)
 	auto vbv = mBoxGeo->VertexBufferView();
 	auto ibv = mBoxGeo->IndexBufferView();
 	g_commandList->IASetVertexBuffers(0, 1, &vbv);
 	g_commandList->IASetIndexBuffer(&ibv);
 	g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-	//// CBV 힙 대신 FrameResouce의 상수 버퍼 GPU 주소를 직접 넘김
-	//D3D12_GPU_VIRTUAL_ADDRESS objCBAddress = mCurrFrameResource->ObjectCB->Resource()->GetGPUVirtualAddress();
-	//g_commandList->SetGraphicsRootConstantBufferView(0, objCBAddress);
-
-	//g_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
-
-	ID3D12DescriptorHeap* heaps[] = { mSrvHeap.Get() };
-	g_commandList->SetDescriptorHeaps(1, heaps);
-
-	g_commandList->SetGraphicsRootDescriptorTable(0, mSrvHeap->GetGPUDescriptorHandleForHeapStart());
-
-	D3D12_GPU_VIRTUAL_ADDRESS passCBAddress = mCurrFrameResource->PassCB->Resource()->GetGPUVirtualAddress();
-	g_commandList->SetGraphicsRootConstantBufferView(2, passCBAddress);				// 슬롯 1, 프레임당 한번만
-
-	UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
-	D3D12_GPU_VIRTUAL_ADDRESS objCBBase = mCurrFrameResource->ObjectCB->Resource()->GetGPUVirtualAddress();
-	
-	// 불투명 먼저
-	g_commandList->OMSetStencilRef(0);			
 	g_commandList->SetPipelineState(mOpaquePSO.Get());
 	for (int i = 0; i < NumObjects; ++i)
 	{
@@ -472,7 +461,6 @@ void Init::Draw()
 		g_commandList->SetGraphicsRootConstantBufferView(1, objCBAddress);
 		g_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
 	}
-
 	// 반투명 나중
 	g_commandList->SetPipelineState(mTransparentPSO.Get());
 	for (int i = 0; i < NumObjects; ++i)
@@ -482,6 +470,22 @@ void Init::Draw()
 		g_commandList->SetGraphicsRootConstantBufferView(1, objCBAddress);
 		g_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
 	}
+
+	auto rtv = CurrentBackBufferView();
+	auto dsv = DepthStencilView();
+	//// CBV 힙 대신 FrameResouce의 상수 버퍼 GPU 주소를 직접 넘김
+	//D3D12_GPU_VIRTUAL_ADDRESS objCBAddress = mCurrFrameResource->ObjectCB->Resource()->GetGPUVirtualAddress();
+	//g_commandList->SetGraphicsRootConstantBufferView(0, objCBAddress);
+
+	//g_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
+
+
+
+	// 불투명 먼저
+	g_commandList->OMSetStencilRef(0);			
+	g_commandList->SetPipelineState(mOpaquePSO.Get());
+
+
 
 	// -- 1단계: 바닥을 스텐실 버퍼에 마킹 (색/깊이는 안 남김)
 	g_commandList->OMSetStencilRef(1);				// 참조값 = 1
@@ -980,6 +984,50 @@ void Init::BuildComputePSO()
 	ThrowIfFailed(g_device->CreateComputePipelineState(&computePsoDesc, IID_PPV_ARGS(&mComputePSO)));
 }
 
+void Init::BuildOffscreenResources()
+{
+	D3D12_RESOURCE_DESC texDesc = {};
+	texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+	texDesc.Width = mClientWidth;
+	texDesc.Height = mClientHeight;
+	texDesc.DepthOrArraySize = 1;
+	texDesc.MipLevels = 1;
+	texDesc.Format = mBackBufferFormat;
+	texDesc.SampleDesc.Count = 1;
+	// 이 텍스처는 두 역할을 함.
+	// 씬을 그릴 때는 렌더 타켓 (RTV)
+	// 블러할 때는 컴퓨트 입력 (SRV)
+	texDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
+					D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;		// RTV + UAV 둘 다
+
+	auto defaultHeap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+
+	// 클리어 값 (렌더 타켓이니 지정)
+	D3D12_CLEAR_VALUE optClear = {};
+	optClear.Format = mBackBufferFormat;
+	const float clearColor[] = { 0.68f, 0.77f, 0.87f, 1.0f };
+	memcpy(optClear.Color, clearColor, sizeof(clearColor));
+
+	ThrowIfFailed(g_device->CreateCommittedResource(
+		&defaultHeap, D3D12_HEAP_FLAG_NONE, &texDesc,
+		D3D12_RESOURCE_STATE_COMMON, &optClear,
+		IID_PPV_ARGS(&mOffscreenTex)));
+}
+
+void Init::BuildOffscreenViews()
+{
+	// 오프스크린 RTV 힙 (1개)
+	D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc = {};
+	rtvHeapDesc.NumDescriptors = 1;
+	rtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+	rtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+	ThrowIfFailed(g_device->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&mOffscreenRtvHeap)));
+
+	// 오프스크린 텍스처에 대한 RTV 생성
+	g_device->CreateRenderTargetView(mOffscreenTex.Get(), nullptr,
+		mOffscreenRtvHeap->GetCPUDescriptorHandleForHeapStart());
+}
+
 /*
 * 텍스처 로드 함수는 반드시 커맨드 리스트가 열려있을 떄 호출해야 됨.
 */
@@ -1112,6 +1160,11 @@ std::vector<float> Init::CalcGaussWeights(float sigma)
 		weights[i] /= weightSum;
 
 	return std::vector<float>();
+}
+
+D3D12_CPU_DESCRIPTOR_HANDLE Init::OffscreenRtv() const
+{
+	return mOffscreenRtvHeap->GetCPUDescriptorHandleForHeapStart();
 }
 
 

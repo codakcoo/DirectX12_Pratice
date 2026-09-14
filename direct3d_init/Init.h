@@ -88,11 +88,16 @@ protected:
 	void BuildPSO();
 	void BuildComputePSO();
 
+	void BuildOffscreenResources();					// 오프스크린용 텍스처 생성
+	void BuildOffscreenViews();						// 오프스크린용 RTV
+
 	void LoadTextures();
 	void BuildSrvHeap();
 
 	void RunComputeTest();
 	std::vector<float> CalcGaussWeights(float sigma);
+
+	D3D12_CPU_DESCRIPTOR_HANDLE OffscreenRtv() const;			// 핸들 접근용 헬퍼
 
 protected:
 
@@ -193,4 +198,10 @@ protected:
 
 	ComPtr<ID3D12Resource> mBlurMap0 = nullptr;		// 텍스처A
 	ComPtr<ID3D12Resource> mBlurMap1 = nullptr;		// 텍스처B
+
+	ComPtr<ID3D12Resource> mOffscreenTex = nullptr;		// 씬을 그릴 오프스크린 텍스처
+	
+	// 오프 스크린용ㅇ RTV, SRV를 담을 힙 (기존 g_rtvHeap와 별도로 관리하거나 확장)
+	ComPtr<ID3D12DescriptorHeap> mOffscreenRtvHeap = nullptr;
+	ComPtr<ID3D12DescriptorHeap> mOffscreenUavHeap = nullptr;
 };
