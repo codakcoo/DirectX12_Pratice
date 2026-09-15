@@ -282,6 +282,9 @@ bool Init::InitD3D()
 	BuildRenderItems();
 	BuildPSO();									// 파이프라인 상태 객체 생성
 	
+	BuildOffscreenResources();
+	BuildOffscreenViews();
+
 	BuildComputeRootSignature();				// Compute 루트 서명 생성
 	BuildComputePSO();
 	RunComputeTest();
@@ -352,7 +355,7 @@ void Init::Update(const GameTimer& gt)
 
 	// 반사 큐브 (인덱스 28) - 0번 큐브를 y=-2 평면에 대해 반사
 	{
-		XMVECTOR mirrorPlane = XMVectorSet(0.0f, -10.0f, 0.0f, 2.0f);		// y=-2 평면 (ax+by+cz+d=0 -> y+2=0)
+		XMVECTOR mirrorPlane = XMVectorSet(0.0f, 1.0f, 0.0f, 2.0f);		// y=-2 평면 (ax+by+cz+d=0 -> y+2=0)
 		XMMATRIX R = XMMatrixReflect(mirrorPlane);
 
 		XMMATRIX cube0world = XMLoadFloat4x4(&mObjectWorlds[0]);		// 0번 큐브의 현재 월드
@@ -418,7 +421,7 @@ void Init::Draw()
 
 	// -- (A) 오프스크린 텍스처를 덴더 타켓 상태로 전이 --
 	auto toRT = CD3DX12_RESOURCE_BARRIER::Transition(
-		CurrentBackBuffer(),
+		mOffscreenTex.Get(),
 		D3D12_RESOURCE_STATE_COMMON,
 		D3D12_RESOURCE_STATE_RENDER_TARGET);
 	g_commandList->ResourceBarrier(1, &toRT);
@@ -428,8 +431,8 @@ void Init::Draw()
 	auto dsv = DepthStencilView();
 
 	const float clearColor[] = { 0.68f, 0.77f, 0.87f, 1.0f };			// LightSteelBlue
-	g_commandList->ClearRenderTargetView(CurrentBackBufferView(), clearColor, 0, nullptr);
-	g_commandList->ClearDepthStencilView(DepthStencilView(),
+	g_commandList->ClearRenderTargetView(offscreenRtv, clearColor, 0, nullptr);
+	g_commandList->ClearDepthStencilView(dsv,
 		D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
 
 	g_commandList->OMSetRenderTargets(1, &offscreenRtv, true, &dsv);		// <- 백버퍼 아님!
@@ -457,8 +460,8 @@ void Init::Draw()
 	for (int i = 0; i < NumObjects; ++i)
 	{
 		if (mObjectTransparent[i]) continue;
-		D3D12_GPU_VIRTUAL_ADDRESS objCBAddress = objCBBase + i * objCBByteSize;			// 물체별 주소
-		g_commandList->SetGraphicsRootConstantBufferView(1, objCBAddress);
+		D3D12_GPU_VIRTUAL_ADDRESS addr = objCBBase + i * objCBByteSize;			// 물체별 주소
+		g_commandList->SetGraphicsRootConstantBufferView(1, addr);
 		g_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
 	}
 	// 반투명 나중
@@ -466,63 +469,43 @@ void Init::Draw()
 	for (int i = 0; i < NumObjects; ++i)
 	{
 		if (!mObjectTransparent[i]) continue;
-		D3D12_GPU_VIRTUAL_ADDRESS objCBAddress = objCBBase + i * objCBByteSize;			// 물체별 주소
-		g_commandList->SetGraphicsRootConstantBufferView(1, objCBAddress);
+		D3D12_GPU_VIRTUAL_ADDRESS addr = objCBBase + i * objCBByteSize;			// 물체별 주소
+		g_commandList->SetGraphicsRootConstantBufferView(1, addr);
 		g_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
 	}
 
-	auto rtv = CurrentBackBufferView();
-	auto dsv = DepthStencilView();
-	//// CBV 힙 대신 FrameResouce의 상수 버퍼 GPU 주소를 직접 넘김
-	//D3D12_GPU_VIRTUAL_ADDRESS objCBAddress = mCurrFrameResource->ObjectCB->Resource()->GetGPUVirtualAddress();
-	//g_commandList->SetGraphicsRootConstantBufferView(0, objCBAddress);
-
-	//g_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
-
-
-
-	// 불투명 먼저
-	g_commandList->OMSetStencilRef(0);			
-	g_commandList->SetPipelineState(mOpaquePSO.Get());
-
-
-
-	// -- 1단계: 바닥을 스텐실 버퍼에 마킹 (색/깊이는 안 남김)
-	g_commandList->OMSetStencilRef(1);				// 참조값 = 1
-	g_commandList->SetPipelineState(mMarkStencilPSO.Get());
-	{
-		auto vbv = mFloorGeo->VertexBufferView();
-		auto ibv = mFloorGeo->IndexBufferView();
-		g_commandList->IASetVertexBuffers(0, 1, &vbv);
-		g_commandList->IASetIndexBuffer(&ibv);
-		g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-	
-		D3D12_GPU_VIRTUAL_ADDRESS addr = objCBBase + 27 * objCBByteSize;				// 바닥 = 27번
-		g_commandList->SetGraphicsRootConstantBufferView(1, addr);
-		g_commandList->DrawIndexedInstanced(6, 1, 0, 0, 0);								// quad = 인덱스 = 6개
-	}
-
-	// -- 2단계: 스텐실 마킹된 곳에만 반사 큐브 그리기
-	g_commandList->SetPipelineState(mReflectionPSO.Get());
-	{
-		auto vbv = mBoxGeo->VertexBufferView();
-		auto ibv = mBoxGeo->IndexBufferView();
-		g_commandList->IASetVertexBuffers(0, 1, &vbv);
-		g_commandList->IASetIndexBuffer(&ibv);
-		g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-
-		D3D12_GPU_VIRTUAL_ADDRESS addr = objCBBase + 28 * objCBByteSize;				// 반사 큐브 = 28번
-		g_commandList->SetGraphicsRootConstantBufferView(1, addr);
-		g_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);							// 큐브 = 인덱스 = 36개
-	}
-
-	// 재설정을 완료했기에 다시 타입을 바꿈
-	// 렌더 대상(Render_Target) -> 표현(Present)
-	auto toPresent = CD3DX12_RESOURCE_BARRIER::Transition(
-		CurrentBackBuffer(),
+	// -- (C) 백퍼버로 복사하기 위한 상태 전이
+	// 오프스크린: RENDER_TARGET -> COPY_SOURCE
+	auto offToCopy = CD3DX12_RESOURCE_BARRIER::Transition(
+		mOffscreenTex.Get(),
 		D3D12_RESOURCE_STATE_RENDER_TARGET,
+		D3D12_RESOURCE_STATE_COPY_SOURCE);
+	g_commandList->ResourceBarrier(1, &offToCopy);
+	
+	// 백버퍼: PRESENT -> COPY_DEST
+	auto backToCopy = CD3DX12_RESOURCE_BARRIER::Transition(
+		CurrentBackBuffer(),
+		D3D12_RESOURCE_STATE_PRESENT,
+		D3D12_RESOURCE_STATE_COPY_DEST);
+	g_commandList->ResourceBarrier(1, &backToCopy);
+
+	// -- (D) 복사 --
+	g_commandList->CopyResource(CurrentBackBuffer(), mOffscreenTex.Get());
+
+	// -- (E) 백버퍼: COPY_DEST -> PRESENT --
+	auto backToPresent = CD3DX12_RESOURCE_BARRIER::Transition(
+		CurrentBackBuffer(),
+		D3D12_RESOURCE_STATE_COPY_DEST,
 		D3D12_RESOURCE_STATE_PRESENT);
-	g_commandList->ResourceBarrier(1, &toPresent);
+	g_commandList->ResourceBarrier(1, &backToPresent);
+
+	// 오프스크린을 다음 프레임을 위해 COMMON으로
+	auto offToCommon = CD3DX12_RESOURCE_BARRIER::Transition(
+		mOffscreenTex.Get(),
+		D3D12_RESOURCE_STATE_COPY_SOURCE,
+		D3D12_RESOURCE_STATE_COMMON);
+	g_commandList->ResourceBarrier(1, &offToCommon);
+
 
 	ThrowIfFailed(g_commandList->Close());
 	ID3D12CommandList* cmdsLists[] = { g_commandList.Get() };
@@ -1159,7 +1142,7 @@ std::vector<float> Init::CalcGaussWeights(float sigma)
 	for(int i = 0; i < weights.size(); ++i)
 		weights[i] /= weightSum;
 
-	return std::vector<float>();
+	return weights;
 }
 
 D3D12_CPU_DESCRIPTOR_HANDLE Init::OffscreenRtv() const
