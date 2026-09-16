@@ -284,6 +284,10 @@ bool Init::InitD3D()
 	
 	BuildOffscreenResources();
 	BuildOffscreenViews();
+	BuildBlurResources();
+	BuildBlurDescriptorHeap();
+	BuildBlurRootSignature();
+	BuildBlurPSO();
 
 	BuildComputeRootSignature();				// Compute 루트 서명 생성
 	BuildComputePSO();
@@ -804,17 +808,19 @@ void Init::BuildFrameResources()
 	}
 }
 
+// 포멧을 mBackBufferFormat으로 맞춘 게 중요.
+// 오프스크린 텍스처를 블러맵으로 복사하거나 읽을 때 포맷이 같아야 함.
 void Init::BuildBlurResources()
 {
 	auto texDesc = mBoxTex->Resource->GetDesc();		// 원본과 같은 크기/포맷
 
 	D3D12_RESOURCE_DESC blurTexDesc = {};
 	blurTexDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-	blurTexDesc.Width = texDesc.Width;
-	blurTexDesc.Height = texDesc.Height;
+	blurTexDesc.Width = mClientWidth;
+	blurTexDesc.Height = mClientHeight;
 	blurTexDesc.DepthOrArraySize = 1;
 	blurTexDesc.MipLevels = 1;
-	blurTexDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;		// UAV 지원 포맷
+	blurTexDesc.Format = mBackBufferFormat;		// UAV 지원 포맷
 	blurTexDesc.SampleDesc.Count = 1;
 	blurTexDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;		// UAV 필수
 
@@ -1009,6 +1015,193 @@ void Init::BuildOffscreenViews()
 	// 오프스크린 텍스처에 대한 RTV 생성
 	g_device->CreateRenderTargetView(mOffscreenTex.Get(), nullptr,
 		mOffscreenRtvHeap->GetCPUDescriptorHandleForHeapStart());
+}
+
+/*
+* 블러에 필요한 뷰들
+* 오프스크린 텍스처의 SRV (블러 입력으로 읽기; 1개)
+* 블러맵0의 SRV, UAV	(2개)
+* 블러맵1의 SRV, UAV	(2개)
+*/
+void Init::BuildBlurDescriptorHeap()
+{
+	D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
+	heapDesc.NumDescriptors = 5;						// 오프스크린 SRV, 블러0 SRV/UAV, 블러1 SRV/UAV
+	heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+	heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+	ThrowIfFailed(g_device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&mBlurHeap)));
+
+	UINT descSize = g_cbvSrvUavDescriptorSize;
+	auto cpuStart = mBlurHeap->GetCPUDescriptorHandleForHeapStart();
+
+	// 각 뷰를 힙의 순서대로 배치
+	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	srvDesc.Format = mBackBufferFormat;
+	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+	srvDesc.Texture2D.MipLevels = 1;
+
+	D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+	uavDesc.Format = mBackBufferFormat;
+	uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+
+	CD3DX12_CPU_DESCRIPTOR_HANDLE handle(cpuStart);
+
+	// 슬롯 0: 오프스크린 SRV
+	g_device->CreateShaderResourceView(mOffscreenTex.Get(), &srvDesc, handle);
+	handle.Offset(1, descSize);
+
+	// 슬롯 1: 블러맵0 SRV
+	g_device->CreateShaderResourceView(mBlurMap0.Get(), &srvDesc, handle);
+	handle.Offset(1, descSize);
+
+	// 슬롯 2: 블러맵0 UAV
+	g_device->CreateUnorderedAccessView(mBlurMap0.Get(), nullptr, &uavDesc, handle);
+	handle.Offset(1, descSize);
+
+	// 슬롯 3: 블러맵1 SRV
+	g_device->CreateShaderResourceView(mBlurMap1.Get(), &srvDesc, handle);
+	handle.Offset(1, descSize);
+
+	// 슬롯 4: 블러맵1 UAV
+	g_device->CreateUnorderedAccessView(mBlurMap1.Get(), nullptr, &uavDesc, handle);
+}
+
+/*
+* 블러 루트 시그니처 
+* 블러 셰이더가 받는 것:
+* 블러 설정 상수(b0)
+* 입력 SRV 테이블(t0),
+* 출력 UAV 테이블(u0)
+*/
+void Init::BuildBlurRootSignature()
+{
+	CD3DX12_DESCRIPTOR_RANGE srvTable;
+	srvTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);		// t0
+
+	CD3DX12_DESCRIPTOR_RANGE uavTable;
+	uavTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0);		// u0
+
+	CD3DX12_ROOT_PARAMETER slotRootParameter[3];
+	// 루트 파라미터 종류 중 루트 상수.
+	// 작은 값(int 1개 + float 11ro = 12 DWORD)을 루트 시그니처에 직접 박아넣는 방식.
+	// SetComputeRoot32BitConstants로 넘길것
+	slotRootParameter[0].InitAsConstants(12, 0);				// b0: 블러 설정 (int 1 + float 11 = 12개)
+	slotRootParameter[1].InitAsDescriptorTable(1, &srvTable);	// t0: 입력 SRV
+	slotRootParameter[2].InitAsDescriptorTable(1, &uavTable);	// u0: 출력 UAV
+
+	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(3, slotRootParameter, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE);
+
+	ComPtr<ID3DBlob> serializedRootSig = nullptr;
+	ComPtr<ID3DBlob> errorBlob = nullptr;
+	HRESULT hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1, serializedRootSig.GetAddressOf(), errorBlob.GetAddressOf());
+
+	if(errorBlob != nullptr)
+		OutputDebugStringA((char*)errorBlob->GetBufferPointer());
+	ThrowIfFailed(hr);
+
+	ThrowIfFailed(g_device->CreateRootSignature(0,
+		serializedRootSig->GetBufferPointer(), serializedRootSig->GetBufferSize(),
+		IID_PPV_ARGS(&mBlurRootSignature)));
+}
+
+void Init::BuildBlurPSO()
+{
+	mHorzBlurByteCode = d3dUtil::CompileShader(L"Shaders\\blur.hlsl", nullptr, "HorzBlurCS", "cs_5_0");
+	mVertBlurByteCode = d3dUtil::CompileShader(L"Shaders\\blur.hlsl", nullptr, "VertBlurCS", "cs_5_0");
+
+	// 가로 블러 PSO
+	D3D12_COMPUTE_PIPELINE_STATE_DESC horzPsoDesc = {};
+	horzPsoDesc.pRootSignature = mBlurRootSignature.Get();
+	horzPsoDesc.CS = 
+	{
+		reinterpret_cast<BYTE*>(mHorzBlurByteCode->GetBufferPointer()),
+		mHorzBlurByteCode->GetBufferSize()
+	};
+	horzPsoDesc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
+	ThrowIfFailed(g_device->CreateComputePipelineState(&horzPsoDesc, IID_PPV_ARGS(&mHorzBlurPSO)));
+	
+
+	// 세로 블러 PSO
+	D3D12_COMPUTE_PIPELINE_STATE_DESC vertPsoDesc = {};
+	vertPsoDesc.pRootSignature = mBlurRootSignature.Get();
+	vertPsoDesc.CS =
+	{
+		reinterpret_cast<BYTE*>(mVertBlurByteCode->GetBufferPointer()),
+		mVertBlurByteCode->GetBufferSize()
+	};
+	vertPsoDesc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
+	ThrowIfFailed(g_device->CreateComputePipelineState(&vertPsoDesc, IID_PPV_ARGS(&mVertBlurPSO)));
+}
+
+void Init::BlurExecute(int blurCount)
+{
+	// 가우시안 가중치 계산
+	auto weights = CalcGaussWeights(2.5f);
+	int blurRadius = (int)weights.size() / 2;
+
+	g_commandList->SetComputeRootSignature(mBlurRootSignature.Get());
+
+	// 블러 힙 바인딩
+	ID3D12DescriptorHeap* heaps[] = { mBlurHeap.Get() };
+	g_commandList->SetDescriptorHeaps(1, heaps);
+
+	UINT descSize = g_cbvSrvUavDescriptorSize;
+	auto gpuStart = mBlurHeap->GetGPUDescriptorHandleForHeapStart();
+
+	// 힙 슬롯별 GPU 핸들 (BuildBlurDescriptorHeap 순서와 일치)
+	CD3DX12_GPU_DESCRIPTOR_HANDLE offscreenSrv(gpuStart, 0, descSize);			// 슬롯0
+	CD3DX12_GPU_DESCRIPTOR_HANDLE blur0Srv(gpuStart, 1, descSize);			// 슬롯1
+	CD3DX12_GPU_DESCRIPTOR_HANDLE blur0Uav(gpuStart, 2, descSize);			// 슬롯2
+	CD3DX12_GPU_DESCRIPTOR_HANDLE blur1Srv(gpuStart, 3, descSize);			// 슬롯3
+	CD3DX12_GPU_DESCRIPTOR_HANDLE blur1Uav(gpuStart, 4, descSize);			// 슬롯4
+
+	// 블러 설정 상수 (b0) - 루트 상수로 직접 전달
+	g_commandList->SetComputeRoot32BitConstants(0, 1, &blurRadius, descSize);
+	g_commandList->SetComputeRoot32BitConstants(0, (UINT)weights.size(), weights.data(), 1);
+
+	// -- 입력 준비: 오프스크린을 SRV로 읽을 수 읽게, 블러맵0을 UAV로 쓸 수 있게 --
+	// 오프스크린: COPY_SOURCE(Draw에서 온 상태) -> GENERIC_READ
+	// * 여기서 오프스크린 상태를 Draw()와 맞춰야 함 (아래 4단계에서 조정)
+
+	for (int i = 0; i < blurCount; ++i)
+	{
+		// -- 가로 블러: 오프스크린(또는 이전 결과) -> 블러맵0 --
+		g_commandList->SetPipelineState(mHorzBlurPSO.Get());
+
+		g_commandList->SetComputeRootDescriptorTable(1, (i==0) ? offscreenSrv : blur1Srv);			// 입력
+		g_commandList->SetComputeRootDescriptorTable(2, blur0Uav);									// 출력
+
+		// 가로: N개 스레드로 가로 한 줄씩, 세로는 픽셀 개수만큼 그룹
+		UINT numGroupX = (UINT)ceilf(mClientWidth / 256.0f);
+		g_commandList->Dispatch(numGroupX, mClientHeight, 1);
+
+		// 블러맵0: UAV(방금 씀) -> SRV(다음에 읽음), 블러맵1: SRV -> UAV
+		auto b0ToSrv = CD3DX12_RESOURCE_BARRIER::Transition(mBlurMap0.Get(),
+			D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_GENERIC_READ);
+		auto b1ToUav = CD3DX12_RESOURCE_BARRIER::Transition(mBlurMap1.Get(),
+			D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+		g_commandList->ResourceBarrier(1, &b0ToSrv);
+		g_commandList->ResourceBarrier(1, &b1ToUav);
+
+		// -- 세로 블러: 블러맵0 -> 블러맵1 --
+		g_commandList->SetPipelineState(mVertBlurPSO.Get());
+
+		g_commandList->SetComputeRootDescriptorTable(1, blur0Srv);									// 입력
+		g_commandList->SetComputeRootDescriptorTable(1, blur1Uav);									// 출력
+
+		UINT numGroupY = (UINT)ceilf(mClientHeight / 256.0f);
+		g_commandList->Dispatch(mClientWidth, numGroupY, 1);
+
+		// 다음 반복을 위해 되돌림: 블러맵0 SRV->UAV, 블러맵1 UAV->SRV
+		auto b0ToUav = CD3DX12_RESOURCE_BARRIER::Transition(mBlurMap0.Get(),
+			D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+		auto b1ToSrv = CD3DX12_RESOURCE_BARRIER::Transition(mBlurMap1.Get(),
+			D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_GENERIC_READ);
+		g_commandList->ResourceBarrier(1, &b0ToUav);
+		g_commandList->ResourceBarrier(1, &b1ToSrv);
+	}
+	// 최종 결과는 블러맵1에 (마지막이 세로 블러 -> 블러맵1, 근데 위에서 b1ToSrv 했으니 SRV 상태)
 }
 
 /*

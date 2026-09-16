@@ -90,6 +90,11 @@ protected:
 
 	void BuildOffscreenResources();					// 오프스크린용 텍스처 생성
 	void BuildOffscreenViews();						// 오프스크린용 RTV
+	void BuildBlurDescriptorHeap();					// 블러 디스크립터 힙 생성
+	void BuildBlurRootSignature();					// 블러 루트 시그니처 생성
+	void BuildBlurPSO();							// 블러 파이프라인 스테이트 오브젝트 생성
+
+	void BlurExecute(int blurCount);				// 블러 실행 함수 (블러의 하이라이트; 핑퐁, UAV배리어)
 
 	void LoadTextures();
 	void BuildSrvHeap();
@@ -201,7 +206,16 @@ protected:
 
 	ComPtr<ID3D12Resource> mOffscreenTex = nullptr;		// 씬을 그릴 오프스크린 텍스처
 	
-	// 오프 스크린용ㅇ RTV, SRV를 담을 힙 (기존 g_rtvHeap와 별도로 관리하거나 확장)
+
+	// 오프 스크린용 RTV, SRV를 담을 힙 (기존 g_rtvHeap와 별도로 관리하거나 확장)
 	ComPtr<ID3D12DescriptorHeap> mOffscreenRtvHeap = nullptr;
 	ComPtr<ID3D12DescriptorHeap> mOffscreenUavHeap = nullptr;
+	
+	ComPtr<ID3D12DescriptorHeap> mBlurHeap = nullptr;
+
+	ComPtr<ID3D12RootSignature> mBlurRootSignature = nullptr;
+	ComPtr<ID3D12PipelineState> mHorzBlurPSO = nullptr;
+	ComPtr<ID3D12PipelineState> mVertBlurPSO = nullptr;
+	ComPtr<ID3DBlob> mHorzBlurByteCode = nullptr;
+	ComPtr<ID3DBlob> mVertBlurByteCode = nullptr;
 };

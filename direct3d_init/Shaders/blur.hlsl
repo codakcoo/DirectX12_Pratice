@@ -59,3 +59,38 @@ void HorzBlurCS(int3 groupThreadID : SV_GroupThreadID,
     
     gOutput[dispatchThreadID.xy] = blurColor;
 }
+
+[numthreads(1, N, 1)]
+void VertBlurCS(int3 groupThreadID : SV_GroupThreadID,
+                int3 dispatchThreadID : SV_DispatchThreadID)
+{
+    float weights[11] = { w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10 };
+
+    uint width, height;
+    gInput.GetDimensions(width, height);
+    
+    if (groupThreadID.y < gBlurRadius)
+    {
+        int y = max(dispatchThreadID.y - gBlurRadius, 0);
+        gCache[groupThreadID.y] = gInput[int2(dispatchThreadID.x, y)];
+    }
+    if(groupThreadID.y >= N - gBlurRadius)
+    {
+        int y = min(dispatchThreadID.y + gBlurRadius, height - 1);
+        gCache[groupThreadID.y + 2 * gBlurRadius] = gInput[int2(dispatchThreadID.x, y)];
+    }
+    
+    gCache[groupThreadID.y + gBlurRadius] = gInput[min(dispatchThreadID.xy, int2(width - 1, height - 1))];
+    
+    GroupMemoryBarrierWithGroupSync();
+    
+    float4 blurColor = float4(0, 0, 0, 0);
+    for (int i = -gBlurRadius; i <= gBlurRadius; ++i)
+    {
+        int k = groupThreadID.y + gBlurRadius + i;
+        blurColor += weights[i + gBlurRadius] * gCache[k];
+    }
+    
+    gOutput[dispatchThreadID.xy] = blurColor;
+
+}
