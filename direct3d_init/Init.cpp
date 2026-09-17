@@ -416,7 +416,6 @@ void Init::FlushCommandQueue()
 void Init::Draw()
 {
 	auto cmdListAlloc = mCurrFrameResource->CmdListAlloc;			// FrameResource의 얼로케이터
-
 	ThrowIfFailed(cmdListAlloc->Reset());							// FrameResource에 있는 얼로케이터를 Reset
 	ThrowIfFailed(g_commandList->Reset(cmdListAlloc.Get(), mOpaquePSO.Get()));
 
@@ -443,8 +442,8 @@ void Init::Draw()
 
 	g_commandList->SetGraphicsRootSignature(mRootSignature.Get());
 
-	ID3D12DescriptorHeap* heaps[] = { mSrvHeap.Get() };
-	g_commandList->SetDescriptorHeaps(1, heaps);
+	ID3D12DescriptorHeap* srvHeaps[] = { mSrvHeap.Get() };
+	g_commandList->SetDescriptorHeaps(1, srvHeaps);
 	g_commandList->SetGraphicsRootDescriptorTable(0, mSrvHeap->GetGPUDescriptorHandleForHeapStart());
 
 	D3D12_GPU_VIRTUAL_ADDRESS passCBAddress = mCurrFrameResource->PassCB->Resource()->GetGPUVirtualAddress();
@@ -478,13 +477,16 @@ void Init::Draw()
 		g_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
 	}
 
-	// -- (C) 백퍼버로 복사하기 위한 상태 전이
-	// 오프스크린: RENDER_TARGET -> COPY_SOURCE
-	auto offToCopy = CD3DX12_RESOURCE_BARRIER::Transition(
-		mOffscreenTex.Get(),
-		D3D12_RESOURCE_STATE_RENDER_TARGET,
+	// (C) 블러 실행 -- 오프스크린(RENDER_TARGET 상태)을 입력으로
+	BlurExecute(1);										// 블러 1회. 안에서 오프스크린을 GENERIC_READ로 전이함
+
+	// -- (D) 블러 결과(블러맵1)를 백버퍼로 복사
+	// 오프스크린: GENERIC_READ -> COPY_SOURCE
+	auto b1ToCopy = CD3DX12_RESOURCE_BARRIER::Transition(
+		mBlurMap1.Get(),
+		D3D12_RESOURCE_STATE_GENERIC_READ,
 		D3D12_RESOURCE_STATE_COPY_SOURCE);
-	g_commandList->ResourceBarrier(1, &offToCopy);
+	g_commandList->ResourceBarrier(1, &b1ToCopy);
 	
 	// 백버퍼: PRESENT -> COPY_DEST
 	auto backToCopy = CD3DX12_RESOURCE_BARRIER::Transition(
@@ -493,21 +495,28 @@ void Init::Draw()
 		D3D12_RESOURCE_STATE_COPY_DEST);
 	g_commandList->ResourceBarrier(1, &backToCopy);
 
-	// -- (D) 복사 --
-	g_commandList->CopyResource(CurrentBackBuffer(), mOffscreenTex.Get());
+	// -- 복사 --
+	g_commandList->CopyResource(CurrentBackBuffer(), mBlurMap1.Get());
 
-	// -- (E) 백버퍼: COPY_DEST -> PRESENT --
+	// -- (E) 원상복구 --
+	// 백버퍼: COPY_DEST -> PRESENT
 	auto backToPresent = CD3DX12_RESOURCE_BARRIER::Transition(
 		CurrentBackBuffer(),
 		D3D12_RESOURCE_STATE_COPY_DEST,
 		D3D12_RESOURCE_STATE_PRESENT);
 	g_commandList->ResourceBarrier(1, &backToPresent);
 
-	// 오프스크린을 다음 프레임을 위해 COMMON으로
+	// 블러맵1: COPY_SOURCE -> GENERIC_READ (다음 프레임 시작 상태로)
+	auto b1ToRead = CD3DX12_RESOURCE_BARRIER::Transition(
+		mBlurMap1.Get(),
+		D3D12_RESOURCE_STATE_COPY_SOURCE,
+		D3D12_RESOURCE_STATE_GENERIC_READ);
+	g_commandList->ResourceBarrier(1, &b1ToRead);
+
+	// 오프스크린: GENERIC_READ -> COMMON (다음 프레임 시작 상태로)
 	auto offToCommon = CD3DX12_RESOURCE_BARRIER::Transition(
 		mOffscreenTex.Get(),
-		D3D12_RESOURCE_STATE_COPY_SOURCE,
-		D3D12_RESOURCE_STATE_COMMON);
+		D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_STATE_COMMON);
 	g_commandList->ResourceBarrier(1, &offToCommon);
 
 
@@ -826,13 +835,18 @@ void Init::BuildBlurResources()
 
 	auto defaultHeap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
 
-	ThrowIfFailed(g_device->CreateCommittedResource(
-		&defaultHeap, D3D12_HEAP_FLAG_NONE, &blurTexDesc,
-		D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&mBlurMap0)));
+	// BlurExecute()는 블러맵0이 UAV상태, 블러맵1이 GENERIC_READ 상태로 시작한다고 가정.
+	// 첫 프레임 상태를 맞춰줘야 함
 
+	// 블러맵0은 UAV로 시작 (가로 블러가 여기 씀)
 	ThrowIfFailed(g_device->CreateCommittedResource(
 		&defaultHeap, D3D12_HEAP_FLAG_NONE, &blurTexDesc,
-		D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&mBlurMap1)));
+		D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&mBlurMap0)));
+
+	// 블러맵1은 GENERIC_READ로 시작
+	ThrowIfFailed(g_device->CreateCommittedResource(
+		&defaultHeap, D3D12_HEAP_FLAG_NONE, &blurTexDesc,
+		D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&mBlurMap1)));
 }
 
 void Init::BuildRenderItems()
@@ -1157,8 +1171,13 @@ void Init::BlurExecute(int blurCount)
 	CD3DX12_GPU_DESCRIPTOR_HANDLE blur1Uav(gpuStart, 4, descSize);			// 슬롯4
 
 	// 블러 설정 상수 (b0) - 루트 상수로 직접 전달
-	g_commandList->SetComputeRoot32BitConstants(0, 1, &blurRadius, descSize);
+	g_commandList->SetComputeRoot32BitConstants(0, 1, &blurRadius, 0);
 	g_commandList->SetComputeRoot32BitConstants(0, (UINT)weights.size(), weights.data(), 1);
+
+	// 오프스크린을 블러 입력(SRV)으로 읽을 수 있게
+	auto offToRead = CD3DX12_RESOURCE_BARRIER::Transition(mOffscreenTex.Get(),
+		D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_GENERIC_READ);
+	g_commandList->ResourceBarrier(1, &offToRead);
 
 	// -- 입력 준비: 오프스크린을 SRV로 읽을 수 읽게, 블러맵0을 UAV로 쓸 수 있게 --
 	// 오프스크린: COPY_SOURCE(Draw에서 온 상태) -> GENERIC_READ
@@ -1188,7 +1207,7 @@ void Init::BlurExecute(int blurCount)
 		g_commandList->SetPipelineState(mVertBlurPSO.Get());
 
 		g_commandList->SetComputeRootDescriptorTable(1, blur0Srv);									// 입력
-		g_commandList->SetComputeRootDescriptorTable(1, blur1Uav);									// 출력
+		g_commandList->SetComputeRootDescriptorTable(2, blur1Uav);									// 출력
 
 		UINT numGroupY = (UINT)ceilf(mClientHeight / 256.0f);
 		g_commandList->Dispatch(mClientWidth, numGroupY, 1);
