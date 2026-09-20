@@ -21,6 +21,11 @@ struct ObjectConstants
 	DirectX::XMFLOAT4X4 World = MathHelper::Identity4x4();
 };
 
+struct InstanceData
+{
+	DirectX::XMFLOAT4X4 World = MathHelper::Identity4x4();
+};
+
 struct Texture
 {
 	std::string name;

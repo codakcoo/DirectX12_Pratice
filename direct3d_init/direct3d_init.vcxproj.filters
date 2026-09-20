@@ -73,10 +73,10 @@
     <None Include="Shaders\color.hlsl">
       <Filter>Shaders</Filter>
     </None>
-    <None Include="blur.hlsl">
+    <None Include="Shaders\blur.hlsl">
       <Filter>Shaders</Filter>
     </None>
-    <None Include="compute.hlsl">
+    <None Include="Shaders\compute.hlsl">
       <Filter>Shaders</Filter>
     </None>
   </ItemGroup>

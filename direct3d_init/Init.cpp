@@ -107,11 +107,11 @@ LRESULT Init::MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 		return 0;
 	case WM_KEYUP:
 		if (wParam == VK_ESCAPE)
-		{
 			PostQuitMessage(0);
-		}
 		else if ((int)wParam == VK_F2)
 			Set4xMsaaState(!m4xMsaaState);
+		else if ((int)wParam == VK_F3)						// 블러 토글
+			mBlurEnabled = !mBlurEnabled;
 
 		return 0;
 	}
@@ -345,30 +345,14 @@ void Init::Update(const GameTimer& gt)
 		XMMATRIX spin = XMMatrixRotationY(mObjectThetas[i]);
 		XMMATRIX world = spin * baseTranslate;									// 자전 후 배치 위치로 이동
 
-		ObjectConstants objConstants;
-		XMStoreFloat4x4(&objConstants.World, XMMatrixTranspose(world));	// HLSL은 행우선이므로 전치행렬로 변환
-		mCurrFrameResource->ObjectCB->CopyData(i, objConstants);	// i번 슬롯에 상수 버퍼에 복사
-	}
+		//ObjectConstants objConstants;
+		//XMStoreFloat4x4(&objConstants.World, XMMatrixTranspose(world));	// HLSL은 행우선이므로 전치행렬로 변환
+		//mCurrFrameResource->ObjectCB->CopyData(i, objConstants);	// i번 슬롯에 상수 버퍼에 복사
 
-	// 바닥 (인덱스 27) - 회전 없이 고정
-	{
-		ObjectConstants floorConstants;
-		XMStoreFloat4x4(&floorConstants.World, XMMatrixTranspose(XMMatrixIdentity()));
-		mCurrFrameResource->ObjectCB->CopyData(27, floorConstants);
-	}
 
-	// 반사 큐브 (인덱스 28) - 0번 큐브를 y=-2 평면에 대해 반사
-	{
-		XMVECTOR mirrorPlane = XMVectorSet(0.0f, 1.0f, 0.0f, 2.0f);		// y=-2 평면 (ax+by+cz+d=0 -> y+2=0)
-		XMMATRIX R = XMMatrixReflect(mirrorPlane);
-
-		XMMATRIX cube0world = XMLoadFloat4x4(&mObjectWorlds[0]);		// 0번 큐브의 현재 월드
-		XMMATRIX spin = XMMatrixRotationY(mObjectThetas[0]);
-		XMMATRIX world = spin * cube0world * R;							// 큐브 변환 후 반사
-
-		ObjectConstants reflectConstants;
-		XMStoreFloat4x4(&reflectConstants.World, XMMatrixTranspose(world));
-		mCurrFrameResource->ObjectCB->CopyData(28, reflectConstants);
+		InstanceData data;
+		XMStoreFloat4x4(&data.World, XMMatrixTranspose(world));	// HLSL은 행우선이므로 전치행렬로 변환
+		mCurrFrameResource->InstanceBuffer->CopyData(i, data);	// i번 슬롯에 상수 버퍼에 복사
 	}
 }
 
@@ -446,47 +430,53 @@ void Init::Draw()
 	g_commandList->SetDescriptorHeaps(1, srvHeaps);
 	g_commandList->SetGraphicsRootDescriptorTable(0, mSrvHeap->GetGPUDescriptorHandleForHeapStart());
 
+	// t1 인스턴스 버퍼
+	g_commandList->SetGraphicsRootShaderResourceView(1, mCurrFrameResource->InstanceBuffer->Resource()->GetGPUVirtualAddress());
+
+	// b1 패스
 	D3D12_GPU_VIRTUAL_ADDRESS passCBAddress = mCurrFrameResource->PassCB->Resource()->GetGPUVirtualAddress();
 	g_commandList->SetGraphicsRootConstantBufferView(2, passCBAddress);				// 슬롯 1, 프레임당 한번만
-	
-	UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
-	D3D12_GPU_VIRTUAL_ADDRESS objCBBase = mCurrFrameResource->ObjectCB->Resource()->GetGPUVirtualAddress();
 
-	// 큐브들 그리기 (기존 그대로  불투명/반투명)
+	// 정점/인덱스
 	auto vbv = mBoxGeo->VertexBufferView();
 	auto ibv = mBoxGeo->IndexBufferView();
 	g_commandList->IASetVertexBuffers(0, 1, &vbv);
 	g_commandList->IASetIndexBuffer(&ibv);
 	g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
+	// 드로우콜 1번으로 27개
 	g_commandList->SetPipelineState(mOpaquePSO.Get());
-	for (int i = 0; i < NumObjects; ++i)
-	{
-		if (mObjectTransparent[i]) continue;
-		D3D12_GPU_VIRTUAL_ADDRESS addr = objCBBase + i * objCBByteSize;			// 물체별 주소
-		g_commandList->SetGraphicsRootConstantBufferView(1, addr);
-		g_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
-	}
-	// 반투명 나중
-	g_commandList->SetPipelineState(mTransparentPSO.Get());
-	for (int i = 0; i < NumObjects; ++i)
-	{
-		if (!mObjectTransparent[i]) continue;
-		D3D12_GPU_VIRTUAL_ADDRESS addr = objCBBase + i * objCBByteSize;			// 물체별 주소
-		g_commandList->SetGraphicsRootConstantBufferView(1, addr);
-		g_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
-	}
+	g_commandList->DrawIndexedInstanced(36, NumObjects, 0, 0, 0);
 
-	// (C) 블러 실행 -- 오프스크린(RENDER_TARGET 상태)을 입력으로
-	BlurExecute(1);										// 블러 1회. 안에서 오프스크린을 GENERIC_READ로 전이함
+	ID3D12Resource* copySource = nullptr;			// 백버퍼로 복사할 소스
 
-	// -- (D) 블러 결과(블러맵1)를 백버퍼로 복사
-	// 오프스크린: GENERIC_READ -> COPY_SOURCE
-	auto b1ToCopy = CD3DX12_RESOURCE_BARRIER::Transition(
-		mBlurMap1.Get(),
-		D3D12_RESOURCE_STATE_GENERIC_READ,
-		D3D12_RESOURCE_STATE_COPY_SOURCE);
-	g_commandList->ResourceBarrier(1, &b1ToCopy);
+	if (mBlurEnabled)
+	{
+		// (C) 블러 실행 -- 오프스크린(RENDER_TARGET 상태)을 입력으로
+		BlurExecute(4);										// 블러 1회. 안에서 오프스크린을 GENERIC_READ로 전이함
+
+		// -- (D) 블러 결과(블러맵1)를 백버퍼로 복사
+		// 오프스크린: GENERIC_READ -> COPY_SOURCE
+		auto b1ToCopy = CD3DX12_RESOURCE_BARRIER::Transition(
+			mBlurMap1.Get(),
+			D3D12_RESOURCE_STATE_GENERIC_READ,
+			D3D12_RESOURCE_STATE_COPY_SOURCE);
+		g_commandList->ResourceBarrier(1, &b1ToCopy);
+
+		copySource = mBlurMap1.Get();
+	}
+	else
+	{
+		// (블러 없음) 오프스크린을 바로 복사
+		// 오프스크린: RENDER_TARGET -> COPY_SOURCE
+		auto offToCopy = CD3DX12_RESOURCE_BARRIER::Transition(
+			mOffscreenTex.Get(),
+			D3D12_RESOURCE_STATE_RENDER_TARGET,
+			D3D12_RESOURCE_STATE_COPY_SOURCE);
+		g_commandList->ResourceBarrier(1, &offToCopy);
+
+		copySource = mOffscreenTex.Get();
+	}
 	
 	// 백버퍼: PRESENT -> COPY_DEST
 	auto backToCopy = CD3DX12_RESOURCE_BARRIER::Transition(
@@ -496,7 +486,7 @@ void Init::Draw()
 	g_commandList->ResourceBarrier(1, &backToCopy);
 
 	// -- 복사 --
-	g_commandList->CopyResource(CurrentBackBuffer(), mBlurMap1.Get());
+	g_commandList->CopyResource(CurrentBackBuffer(), copySource);
 
 	// -- (E) 원상복구 --
 	// 백버퍼: COPY_DEST -> PRESENT
@@ -506,19 +496,31 @@ void Init::Draw()
 		D3D12_RESOURCE_STATE_PRESENT);
 	g_commandList->ResourceBarrier(1, &backToPresent);
 
-	// 블러맵1: COPY_SOURCE -> GENERIC_READ (다음 프레임 시작 상태로)
-	auto b1ToRead = CD3DX12_RESOURCE_BARRIER::Transition(
-		mBlurMap1.Get(),
-		D3D12_RESOURCE_STATE_COPY_SOURCE,
-		D3D12_RESOURCE_STATE_GENERIC_READ);
-	g_commandList->ResourceBarrier(1, &b1ToRead);
+	// 원상복구 - 블러 여부에 따라 다름
+	if (mBlurEnabled)
+	{
+		// 블러맵1: COPY_SOURCE -> GENERIC_READ (다음 프레임 시작 상태로)
+		auto b1ToRead = CD3DX12_RESOURCE_BARRIER::Transition(
+			mBlurMap1.Get(),
+			D3D12_RESOURCE_STATE_COPY_SOURCE,
+			D3D12_RESOURCE_STATE_GENERIC_READ);
+		g_commandList->ResourceBarrier(1, &b1ToRead);
 
-	// 오프스크린: GENERIC_READ -> COMMON (다음 프레임 시작 상태로)
-	auto offToCommon = CD3DX12_RESOURCE_BARRIER::Transition(
-		mOffscreenTex.Get(),
-		D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_STATE_COMMON);
-	g_commandList->ResourceBarrier(1, &offToCommon);
-
+		// 오프스크린: GENERIC_READ -> COMMON (다음 프레임 시작 상태로)
+		auto offToCommon = CD3DX12_RESOURCE_BARRIER::Transition(
+			mOffscreenTex.Get(),
+			D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_STATE_COMMON);
+		g_commandList->ResourceBarrier(1, &offToCommon);
+	}
+	else
+	{
+		// 오프스크린: COPY_SOURCE -> COMMON
+		auto offToCommon = CD3DX12_RESOURCE_BARRIER::Transition(
+			mOffscreenTex.Get(),
+			D3D12_RESOURCE_STATE_COPY_SOURCE,
+			D3D12_RESOURCE_STATE_COMMON);
+		g_commandList->ResourceBarrier(1, &offToCommon);
+	}
 
 	ThrowIfFailed(g_commandList->Close());
 	ID3D12CommandList* cmdsLists[] = { g_commandList.Get() };
@@ -652,12 +654,12 @@ void Init::BuildDescriptorHeaps()
 void Init::BuildRootSignature()
 {
 	CD3DX12_DESCRIPTOR_RANGE texTable;
-	texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);		// t0,개수 1
+	texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);		// t0 (텍스처)
 	
 	// cbv의 힙을 사용하지 않고 루트 디스크립터 방식으로 GPU 주소로 바로 때려박기 때문에 heap(공간), table(참조)를 안만들어도 됨.
 	CD3DX12_ROOT_PARAMETER slotRootParameter[3];
-	slotRootParameter[0].InitAsDescriptorTable(1, &texTable, D3D12_SHADER_VISIBILITY_PIXEL);			
-	slotRootParameter[1].InitAsConstantBufferView(0);			// b0 - 물체별
+	slotRootParameter[0].InitAsDescriptorTable(1, &texTable, D3D12_SHADER_VISIBILITY_PIXEL);		// t0 텍스처	
+	slotRootParameter[1].InitAsShaderResourceView(1);			// t1 - 물체별 (1)은 레지스터 t1을 뜻함.
 	slotRootParameter[2].InitAsConstantBufferView(1);			// b1 - 패스별
 
 	// 정적 샘플러 - 지난번 얘기한 그 방식, 별도 힙 불필요
@@ -813,7 +815,7 @@ void Init::BuildFrameResources()
 {
 	for (int i = 0; i < NumFrameResources; ++i)
 	{
-		mFrameResources.push_back(std::make_unique<FrameResource>(g_device.Get(), 1, NumObjects));			// 물체 개수 NumObjects개
+		mFrameResources.push_back(std::make_unique<FrameResource>(g_device.Get(), 1, NumObjects, NumObjects));			// 물체 개수 NumObjects개
 	}
 }
 

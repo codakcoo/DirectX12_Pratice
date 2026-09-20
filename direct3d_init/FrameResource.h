@@ -16,7 +16,7 @@
 struct FrameResource
 {
 public:
-	FrameResource(ID3D12Device* device, UINT passCount, UINT objectCount);
+	FrameResource(ID3D12Device* device, UINT passCount, UINT objectCount, UINT instanceCount);
 	FrameResource(const FrameResource& rhs) = delete;
 	FrameResource& operator=(const FrameResource& rhs) = delete;
 	~FrameResource() = default;
@@ -28,6 +28,8 @@ public:
 	std::unique_ptr<UploadBuffer<PassConstants>> PassCB = nullptr;
 	// 프레임마다 독립된 상수 버퍼 - 마찬가지 이유
 	std::unique_ptr<UploadBuffer<ObjectConstants>> ObjectCB = nullptr;
+	std::unique_ptr<UploadBuffer<InstanceData>> InstanceBuffer = nullptr;
+
 
 	// 이 프레임의 명령이 GPU에서 완료됐는지 확인할 펜스 값
 	UINT64 Fence = 0;

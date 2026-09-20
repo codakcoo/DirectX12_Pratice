@@ -218,4 +218,6 @@ protected:
 	ComPtr<ID3D12PipelineState> mVertBlurPSO = nullptr;
 	ComPtr<ID3DBlob> mHorzBlurByteCode = nullptr;
 	ComPtr<ID3DBlob> mVertBlurByteCode = nullptr;
+	
+	bool mBlurEnabled = true;
 };

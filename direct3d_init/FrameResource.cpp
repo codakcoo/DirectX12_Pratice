@@ -2,7 +2,7 @@
 
 
 
-FrameResource::FrameResource(ID3D12Device* device, UINT passCount, UINT objectCount)
+FrameResource::FrameResource(ID3D12Device* device, UINT passCount, UINT objectCount, UINT instanceCount)
 {
 	ThrowIfFailed(device->CreateCommandAllocator(
 		D3D12_COMMAND_LIST_TYPE_DIRECT,
@@ -10,4 +10,5 @@ FrameResource::FrameResource(ID3D12Device* device, UINT passCount, UINT objectCo
 
 	PassCB = std::make_unique<UploadBuffer<PassConstants>> (device, passCount, true);
 	ObjectCB = std::make_unique<UploadBuffer<ObjectConstants>>(device, objectCount, true);
+	InstanceBuffer = std::make_unique<UploadBuffer<InstanceData>>(device, instanceCount, false);
 }
