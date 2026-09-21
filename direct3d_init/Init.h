@@ -5,6 +5,7 @@
 #include <wrl.h>
 #include <DirectXMath.h>
 #include <DirectXColors.h>
+#include <DirectXCollision.h>
 #include <memory>
 #include <array>
 #include <vector>
@@ -71,9 +72,9 @@ protected:
 
 	void CalculateFrameState();
 
-	virtual void OnMouseDown(WPARAM btnState, int x, int y) { }
-	virtual void OnMouseUp(WPARAM btnState, int x, int y) { }
-	virtual void OnMouseMove(WPARAM btnState, int x, int y) { }
+	virtual void OnMouseDown(WPARAM btnState, int x, int y);
+	virtual void OnMouseUp(WPARAM btnState, int x, int y);
+	virtual void OnMouseMove(WPARAM btnState, int x, int y);
 
 	void BuildConstantBuffers();
 	void BuildDescriptorHeaps();
@@ -174,7 +175,7 @@ protected:
 	XMFLOAT4X4 mProj = MathHelper::Identity4x4();
 	XMFLOAT4X4 mWorld = MathHelper::Identity4x4();
 
-	static const int NumObjects = 29;				// 예: 3x3x3 격자 큐브 27개, 바닥 1개, 반사 큐브 1개
+	static const int NumObjects = 1000;				// 예: 3x3x3 격자 큐브 27개, 바닥 1개, 반사 큐브 1개
 	std::vector<XMFLOAT4X4> mObjectWorlds;			// 각 물체의 월드 행렬 
 	std::vector<float> mObjectThetas;				// 각 물체의 회전 속도용 각도
 
@@ -219,5 +220,16 @@ protected:
 	ComPtr<ID3DBlob> mHorzBlurByteCode = nullptr;
 	ComPtr<ID3DBlob> mVertBlurByteCode = nullptr;
 	
-	bool mBlurEnabled = true;
+	bool mBlurEnabled = false;
+
+	// 카메라 (구면 좌표 - 마우스로 궤도 회전)
+	float mCameraTheta			= 1.5f * XM_PI;				// 수평 각도
+	float mCameraPhi			= XM_PIDIV4;				// 수직 각도
+	float mCameraRadius			= 30.0f;					// 원점으로부터 거리
+	POINT mLastMousePos		= { 0, 0 };
+
+	// 컬링
+	DirectX::BoundingFrustum mCameraFrustum;				// 카메라 절두체 (뷰 공간)
+	int mVisibleCount = 0;									// 이번 프레임에 보이는 큐브 수
+	bool mFrustumCullingEnabled = true;						// 컬링 on/off 토글용
 };

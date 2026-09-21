@@ -112,6 +112,8 @@ LRESULT Init::MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 			Set4xMsaaState(!m4xMsaaState);
 		else if ((int)wParam == VK_F3)						// 블러 토글
 			mBlurEnabled = !mBlurEnabled;
+		else if ((int)wParam == VK_F4)
+			mFrustumCullingEnabled = !mFrustumCullingEnabled;
 
 		return 0;
 	}
@@ -318,13 +320,20 @@ void Init::Update(const GameTimer& gt)
 	}
 
 	// 뷰/투영은 공통이니 한 번만
-	// 뷰 행렬 - 카메라가 고정이면 여기서 한 번만 계산해도 되지만
-	// 지금은 이해를 위해 그냥 매 프레임 계산
-	XMVECTOR pos = XMVectorSet(0.0f, 15.0f, -15.0f, 1.0f);		// 카메라를 -z에서 원점 바라보게
+	// 구면 좌표 -> 데카르트 좌표
+	float x = mCameraRadius * sinf(mCameraPhi) * cosf(mCameraTheta);
+	float z = mCameraRadius * sinf(mCameraPhi) * sinf(mCameraTheta);
+	float y = mCameraRadius * cosf(mCameraPhi);
+
+	XMVECTOR pos = XMVectorSet(x, y, z, 1.0f);
 	XMVECTOR target = XMVectorZero();									// 원점
 	XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);		// y축이 위쪽
 	XMMATRIX view = XMMatrixLookAtLH(pos, target, up);
 	XMMATRIX proj = XMMatrixPerspectiveFovLH(0.25f * XM_PI, (float)mClientWidth / mClientHeight, 1.0f, 1000.0f);	// 투영 행렬
+	// 투영 행렬로부터 절두체 생성 (뷰 공간 기준)
+	// 이 절두체는 뷰 공간 기준이다
+	// 카메라가 원점에서 +z를 보는 표준 절두체
+	BoundingFrustum::CreateFromMatrix(mCameraFrustum, proj);
 	XMMATRIX viewProj = view * proj;
 
 	PassConstants passCB;
@@ -337,6 +346,12 @@ void Init::Update(const GameTimer& gt)
 
 	mCurrFrameResource->PassCB->CopyData(0, passCB);						// 패스는 슬롯 1개
 
+	// 뷰 행렬의 역행렬 (월드 -> 뷰 변환용)
+	XMVECTOR viewDet = XMMatrixDeterminant(view);
+	XMMATRIX invView = XMMatrixInverse(&viewDet, view);
+
+	int visibleIdx = 0;					// 인스턴스 버퍼에 실제로 채운 개수
+
 	// 물체마다 개별 계산해서 각자의 슬롯(index)에 복사
 	for (int i = 0; i < NumObjects; ++i)
 	{
@@ -345,15 +360,38 @@ void Init::Update(const GameTimer& gt)
 		XMMATRIX spin = XMMatrixRotationY(mObjectThetas[i]);
 		XMMATRIX world = spin * baseTranslate;									// 자전 후 배치 위치로 이동
 
-		//ObjectConstants objConstants;
-		//XMStoreFloat4x4(&objConstants.World, XMMatrixTranspose(world));	// HLSL은 행우선이므로 전치행렬로 변환
-		//mCurrFrameResource->ObjectCB->CopyData(i, objConstants);	// i번 슬롯에 상수 버퍼에 복사
+		// -- 컬링 검사 --
+		if (mFrustumCullingEnabled)
+		{
+			// 큐브의 로컬 AABBb (큐브가 +-1 크기니까 중심 원점, 반경1)
+			BoundingBox localBox;
+			localBox.Center = { 0.0f, 0.0f, 0.0f };
+			localBox.Extents = { 1.0f, 1.0f, 1.0f };
 
+			// world -> view 변환 행렬 (큐브를 뷰 공간으로)
+			XMVECTOR worldDet = XMMatrixDeterminant(world);
+			XMMATRIX invWorld = XMMatrixInverse(&worldDet, world);
+			// 절두체를 큐브의 로컬 공간으로 가져오는 변환: invWorld * view의 역
+			// 더 간단히: 큐브 박스를 뷰공간으로 옮겨서 절두체와 비교
 
+			XMMATRIX worldToView = world * view;
+			BoundingBox viewBox;
+			localBox.Transform(viewBox, worldToView);				// 큐브 박스를 뷰 공간으로
+
+			// 뷰 공간 절두체 vs 뷰 공간 박스
+			if(mCameraFrustum.Contains(viewBox) == DirectX::DISJOINT)
+				continue;				// 절두체 밖 -> 안 그림
+		}
+
+		// 절두체 안 -> 인스턴스 버퍼에 채움
+		
 		InstanceData data;
 		XMStoreFloat4x4(&data.World, XMMatrixTranspose(world));	// HLSL은 행우선이므로 전치행렬로 변환
-		mCurrFrameResource->InstanceBuffer->CopyData(i, data);	// i번 슬롯에 상수 버퍼에 복사
+		mCurrFrameResource->InstanceBuffer->CopyData(visibleIdx, data);	// i번 슬롯에 상수 버퍼에 복사
+		visibleIdx++;
 	}
+
+	mVisibleCount = visibleIdx;			// 보이는 개수 저장
 }
 
 /*
@@ -446,7 +484,7 @@ void Init::Draw()
 
 	// 드로우콜 1번으로 27개
 	g_commandList->SetPipelineState(mOpaquePSO.Get());
-	g_commandList->DrawIndexedInstanced(36, NumObjects, 0, 0, 0);
+	g_commandList->DrawIndexedInstanced(36, mVisibleCount, 0, 0, 0);
 
 	ID3D12Resource* copySource = nullptr;			// 백버퍼로 복사할 소스
 
@@ -620,12 +658,53 @@ void Init::CalculateFrameState()
 		float mfps = 1000.0f / fps;
 
 		std::wstring text = L"Direct3D 12 Init     fps: " + std::to_wstring((int)fps)
-							+ L"      mfps: " + std::to_wstring(mfps);
+							+ L"      mfps: " + std::to_wstring(mfps)
+							+ L"      visible: " + std::to_wstring(mVisibleCount) + L"/" + std::to_wstring(NumObjects)
+							+ (mFrustumCullingEnabled ? L"   [Cull ON]" : L"    [Cull OFF]");
 		SetWindowText(mhMainWnd, text.c_str());
 
 		frameCnt = 0;
 		timeElapsed += 1.0f;
 	}
+}
+
+void Init::OnMouseDown(WPARAM btnState, int x, int y)
+{
+	mLastMousePos.x = x;
+	mLastMousePos.y = y;
+	SetCapture(mhMainWnd);				// 창 밖으로 나가도 마우스 추적
+}
+
+void Init::OnMouseUp(WPARAM btnState, int x, int y)
+{
+	ReleaseCapture();
+}
+
+void Init::OnMouseMove(WPARAM btnState, int x, int y)
+{
+	if ((btnState & MK_LBUTTON) != 0)
+	{
+		// 마우스 이동량을 각도로 (픽셀당 0.25도)
+		float dx = XMConvertToRadians(0.25f * (float)(x - mLastMousePos.x));
+		float dy = XMConvertToRadians(0.25f * (float)(y - mLastMousePos.y));
+
+		mCameraTheta -= dx;
+		mCameraPhi -= dy;
+
+		// phi를 위아래 뒤집힘 방지 범위로 제한
+		mCameraPhi = MathHelper::Clamp(mCameraPhi, 0.1f, XM_PI - 0.1f);
+	}
+	else if ((btnState & MK_RBUTTON) != 0)
+	{
+		// 우클릭 드래그 = 줌
+		float dx = 0.05f * (float)(x - mLastMousePos.x);
+		float dy = 0.05f * (float)(y - mLastMousePos.y);
+		mCameraRadius += dx - dy;
+		mCameraRadius = MathHelper::Clamp(mCameraRadius, 5.0f, 50.0f);
+	}
+
+	mLastMousePos.x = x;
+	mLastMousePos.y = y;
 }
 
 void Init::BuildConstantBuffers()
@@ -860,11 +939,11 @@ void Init::BuildRenderItems()
 		mObjectTransparent[i] = (i % 3 == 0);			// 세 개 중 하나는 반투명
 
 	int idx = 0;
-	for (int x = -1; x <= 1; ++x)
-	for (int y = -1; y <= 1; ++y)
-	for (int z = -1; z <= 1; ++z)
+	for (int x = 0; x < 10; ++x)
+	for (int y = 0; y < 10; ++y)
+	for (int z = 0; z < 10; ++z)
 	{
-		XMMATRIX translate = XMMatrixTranslation(x * 3.0f, y * 3.0f, z * 3.0f);			// 3칸 간격
+		XMMATRIX translate = XMMatrixTranslation((x-5) * 3.0f, (y-5) * 3.0f, (z-5) * 3.0f);			// 3칸 간격
 		XMStoreFloat4x4(&mObjectWorlds[idx], translate);
 		mObjectThetas[idx] = 0.0f;
 		idx++;
