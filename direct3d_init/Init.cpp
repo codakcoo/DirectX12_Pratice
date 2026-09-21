@@ -274,12 +274,9 @@ bool Init::InitD3D()
 
 	LoadTextures();
 	BuildRootSignature();						// 루트 서명 생성
-	BuildDescriptorHeaps();						// 서술자 힙 생성
-	BuildConstantBuffers();						// 상수 버퍼 생성
 	BuildSrvHeap();								// LoadTextures() 다음에
 	BuildShadersAndInputLayout();				// 쉐이더와 입력 레이아웃 생성
 	BuildBoxGeometry();							// 박스 지오메트리 생성, 여기서 정점/인덱스 버퍼 업로드 명령 기록
-	BuildFloorGeometry();						// quad 지오메트리 생성, 여기서 정점/인덱스 버퍼 업로드 명령 기록(반사용)
 	BuildFrameResources();						// 디바이스만 있으면 되니 근처 아무데나(g_device만 있으됨)
 	BuildRenderItems();
 	BuildPSO();									// 파이프라인 상태 객체 생성
@@ -290,10 +287,6 @@ bool Init::InitD3D()
 	BuildBlurDescriptorHeap();
 	BuildBlurRootSignature();
 	BuildBlurPSO();
-
-	BuildComputeRootSignature();				// Compute 루트 서명 생성
-	BuildComputePSO();
-	RunComputeTest();
 
 	ThrowIfFailed(g_commandList->Close());	// 명령 목록 닫기
 	ID3D12CommandList* cmdsLists[] = { g_commandList.Get() };
@@ -707,29 +700,6 @@ void Init::OnMouseMove(WPARAM btnState, int x, int y)
 	mLastMousePos.y = y;
 }
 
-void Init::BuildConstantBuffers()
-{
-	mObjectCB = std::make_unique<UploadBuffer<ObjectConstants>>(g_device.Get(), 1, true);
-
-	UINT objCBByteSize = d3dUtil::CalcConstantBufferByteSize(sizeof(ObjectConstants));
-	D3D12_GPU_VIRTUAL_ADDRESS cbAddress = mObjectCB->Resource()->GetGPUVirtualAddress();
-
-	D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc;
-	cbvDesc.BufferLocation = cbAddress;
-	cbvDesc.SizeInBytes = objCBByteSize;
-
-	g_device->CreateConstantBufferView(&cbvDesc, mCbvHeap->GetCPUDescriptorHandleForHeapStart());
-}
-
-void Init::BuildDescriptorHeaps()
-{
-	D3D12_DESCRIPTOR_HEAP_DESC cbvHeapDesc = {};
-	cbvHeapDesc.NumDescriptors = 1;
-	cbvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-	cbvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-	g_device->CreateDescriptorHeap(&cbvHeapDesc, IID_PPV_ARGS(&mCbvHeap));
-}
-
 void Init::BuildRootSignature()
 {
 	CD3DX12_DESCRIPTOR_RANGE texTable;
@@ -765,28 +735,6 @@ void Init::BuildRootSignature()
 		IID_PPV_ARGS(&mRootSignature)));
 }
 
-void Init::BuildComputeRootSignature()
-{
-	CD3DX12_ROOT_PARAMETER slotRootParameter[2];
-	slotRootParameter[0].InitAsShaderResourceView(0);			// t0 - 입력 SRV
-	slotRootParameter[1].InitAsUnorderedAccessView(0);			// u0 - 출력 UAV
-
-	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(2, slotRootParameter, 0, nullptr,
-		D3D12_ROOT_SIGNATURE_FLAG_NONE);
-
-	ComPtr<ID3D10Blob> serializedRootSig = nullptr;
-	ComPtr<ID3D10Blob> errorBlob = nullptr;
-	HRESULT hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
-		serializedRootSig.GetAddressOf(), errorBlob.GetAddressOf());
-
-	if(errorBlob != nullptr)
-		OutputDebugStringA((char*)errorBlob->GetBufferPointer());
-	ThrowIfFailed(hr);
-
-	ThrowIfFailed(g_device->CreateRootSignature(0,
-		serializedRootSig->GetBufferPointer(), serializedRootSig->GetBufferSize(),
-		IID_PPV_ARGS(&mComputeRootSignature)));
-}
 
 void Init::BuildBoxGeometry()
 {
@@ -858,43 +806,11 @@ void Init::BuildBoxGeometry()
 	mBoxGeo->IndexBufferByteSize = ibByteSize;
 }
 
-void Init::BuildFloorGeometry()
-{
-	std::array<Vertex, 4> vertices =
-	{
-		Vertex({ XMFLOAT3(-10.0f, -2.0f, -10.0f), XMFLOAT3(0,1,0), XMFLOAT2(0.0f, 1.0f) }),
-		Vertex({ XMFLOAT3(-10.0f, -2.0f, +10.0f), XMFLOAT3(0,1,0), XMFLOAT2(0.0f, 0.0f) }),
-		Vertex({ XMFLOAT3(+10.0f, -2.0f, +10.0f), XMFLOAT3(0,1,0), XMFLOAT2(1.0f, 0.0f) }),
-		Vertex({ XMFLOAT3(+10.0f, -2.0f, -10.0f), XMFLOAT3(0,1,0), XMFLOAT2(1.0f, 1.0f) }),
-	};
-
-	std::array<std::uint16_t, 6> indices = { 0, 1, 2, 0, 2, 3 };
-
-	const UINT vbByteSize = (UINT)vertices.size() * sizeof(Vertex);
-	const UINT ibByteSize = (UINT)indices.size() * sizeof(std::uint16_t);
-
-	mFloorGeo = std::make_unique<MeshGeometry>();
-
-	mFloorGeo->VertexBufferGPU = d3dUtil::CreateDefaultBuffer(
-		g_device.Get(), g_commandList.Get(),
-		vertices.data(), vbByteSize, mFloorGeo->VertexBufferUploader);
-
-
-	mFloorGeo->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(
-		g_device.Get(), g_commandList.Get(),
-		indices.data(), ibByteSize, mFloorGeo->IndexBufferUploader);
-
-	mFloorGeo->VertexByteStride = sizeof(Vertex);
-	mFloorGeo->VertexBufferByteSize = vbByteSize;
-	mFloorGeo->IndexFormat = DXGI_FORMAT_R16_UINT;
-	mFloorGeo->IndexBufferByteSize = ibByteSize;
-}
-
 void Init::BuildFrameResources()
 {
 	for (int i = 0; i < NumFrameResources; ++i)
 	{
-		mFrameResources.push_back(std::make_unique<FrameResource>(g_device.Get(), 1, NumObjects, NumObjects));			// 물체 개수 NumObjects개
+		mFrameResources.push_back(std::make_unique<FrameResource>(g_device.Get(), 1, NumObjects));			// 물체 개수 NumObjects개
 	}
 }
 
@@ -934,9 +850,6 @@ void Init::BuildRenderItems()
 {
 	mObjectWorlds.resize(NumObjects);
 	mObjectThetas.resize(NumObjects);
-	mObjectTransparent.resize(NumObjects);
-	for (int i = 0; i < NumObjects; ++i)
-		mObjectTransparent[i] = (i % 3 == 0);			// 세 개 중 하나는 반투명
 
 	int idx = 0;
 	for (int x = 0; x < 10; ++x)
@@ -1002,70 +915,6 @@ void Init::BuildPSO()
 	transparentPsoDesc.BlendState.RenderTarget[0] = transparentBlendDesc;
 
 	ThrowIfFailed(g_device->CreateGraphicsPipelineState(&transparentPsoDesc, IID_PPV_ARGS(&mTransparentPSO)));
-
-	// -- (1) 스텐실 마킹 PSO - 바닥을 그리되 색/깊이는 안 남기고 스텐실만 1로 마킹
-	D3D12_GRAPHICS_PIPELINE_STATE_DESC markPsoDesc = opaquePsoDesc;
-
-	// 색 안 씀 (렌더타겟에 안 그림)
-	CD3DX12_BLEND_DESC markBlend(D3D12_DEFAULT);
-	markBlend.RenderTarget[0].RenderTargetWriteMask = 0;			// RGBA 다 안 씀
-	markPsoDesc.BlendState = markBlend;
-
-	// 깊이는 테스트하되 쓰진 않음, 스텐실은 항상 통과 + 참조값으로 교체
-	CD3DX12_DEPTH_STENCIL_DESC markDS(D3D12_DEFAULT);
-	markDS.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;			// 깊이 안 씀
-	markDS.StencilEnable = true;
-	markDS.StencilReadMask = 0xff;
-	markDS.StencilWriteMask = 0xff;
-	markDS.FrontFace.StencilFailOp		= D3D12_STENCIL_OP_KEEP;
-	markDS.FrontFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
-	// StencilPassOp = REPLACE + StencilFunc = ALWAYS -> 이 픽셀을 그릴 때 스텐실 버퍼에 참조값을 무조건 써 넣어라 (마킹)
-	markDS.FrontFace.StencilPassOp		= D3D12_STENCIL_OP_REPLACE;			// 통과하면 참조값으로 교체
-	markDS.FrontFace.StencilFunc		= D3D12_COMPARISON_FUNC_ALWAYS;		// 항상 통과
-	markDS.BackFace						= markDS.FrontFace;					// 뒷면도 동일하게
-	markPsoDesc.DepthStencilState = markDS;
-
-	ThrowIfFailed(g_device->CreateGraphicsPipelineState(&markPsoDesc, IID_PPV_ARGS(&mMarkStencilPSO)));
-
-	// --  (2) 반사 PSO - 스텐실 값이 참조값과 같은 곳에만 그림
-	D3D12_GRAPHICS_PIPELINE_STATE_DESC reflectPsoDesc = opaquePsoDesc;
-
-	CD3DX12_DEPTH_STENCIL_DESC reflectDS(D3D12_DEFAULT);
-	reflectDS.StencilEnable = true;
-	reflectDS.StencilReadMask = 0xff;
-	reflectDS.StencilWriteMask = 0xff;
-	reflectDS.FrontFace.StencilFailOp		= D3D12_STENCIL_OP_KEEP;
-	reflectDS.FrontFace.StencilDepthFailOp	= D3D12_STENCIL_OP_KEEP;
-	reflectDS.FrontFace.StencilPassOp		= D3D12_STENCIL_OP_KEEP;
-	// StencilFunc = EQUAL -> 스텐실 버퍼 값이 참조값과 같은 픽셀만 그려라 (마스킹)
-	reflectDS.FrontFace.StencilFunc			= D3D12_COMPARISON_FUNC_EQUAL;		// 스텐실 == 참조값 일 때만
-	reflectDS.BackFace = reflectDS.FrontFace;
-	reflectPsoDesc.DepthStencilState = reflectDS;
-
-	// 반사는 지오메트리가 뒤집혀서 winding이 반대가 되므로 컬링 방향도 뒤집어야 함
-	CD3DX12_RASTERIZER_DESC reflectRS(D3D12_DEFAULT);
-	// FrontCounterClockwise = true 는 반사 때문에 필요함.
-	// 물체를 거울로 반전시키면 삼각형 감는 순서가 뒤짐힘.
-	// 원래 앞면이던 게 뒷면 취급을 받아 컬링돼 사라지기 때문에, 컬링 기준을 반대로 뒤집어 줘야함.
-	reflectRS.FrontCounterClockwise = true;				// 감기 방향 반전 대응
-	reflectPsoDesc.RasterizerState = reflectRS;
-
-	ThrowIfFailed(g_device->CreateGraphicsPipelineState(&reflectPsoDesc, IID_PPV_ARGS(&mReflectionPSO)));
-}
-
-void Init::BuildComputePSO()
-{
-	mComputeByteCode = d3dUtil::CompileShader(L"Shaders\\compute.hlsl", nullptr, "CS", "cs_5_0");
-
-	D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
-	computePsoDesc.pRootSignature = mComputeRootSignature.Get();
-	computePsoDesc.CS = {
-		reinterpret_cast<BYTE*>(mComputeByteCode->GetBufferPointer()),
-		mComputeByteCode->GetBufferSize()
-	};
-	computePsoDesc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
-
-	ThrowIfFailed(g_device->CreateComputePipelineState(&computePsoDesc, IID_PPV_ARGS(&mComputePSO)));
 }
 
 void Init::BuildOffscreenResources()
@@ -1339,77 +1188,6 @@ void Init::BuildSrvHeap()
 
 	g_device->CreateShaderResourceView(mBoxTex->Resource.Get(), &srvDesc,
 		mSrvHeap->GetCPUDescriptorHandleForHeapStart());
-}
-
-void Init::RunComputeTest()
-{
-	const int numElements = 128;
-	const UINT byteSize = numElements * sizeof(float);
-
-	// 입력 데이터 준비 (1, 2, 3, ... 128)
-	std::vector<float> inputData(numElements);
-	for(int i = 0; i < numElements; ++i)
-		inputData[i] = (float)(i + 1);
-
-	// (1) 입력 버퍼 - DEFAULT 힙 + 업로드
-	mInputBuffer = d3dUtil::CreateDefaultBuffer(
-		g_device.Get(), g_commandList.Get(),
-		inputData.data(), byteSize, mInputUploadBuffer);
-
-	// (2) 출력 버퍼 - DEFAULT 힙 + UAV 플래그
-	auto defaultHeap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
-	auto outputDesc = CD3DX12_RESOURCE_DESC::Buffer(byteSize,
-		D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);		// <- UAV 플래그 필수
-	ThrowIfFailed(g_device->CreateCommittedResource(
-		&defaultHeap, D3D12_HEAP_FLAG_NONE, &outputDesc,
-		D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
-		IID_PPV_ARGS(&mOutputBuffer)));
-
-	// (3) readback 버퍼 - READBACK 힙 (CPU가 읽기)
-	auto readbackHeap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_READBACK);
-	auto readbackDesc = CD3DX12_RESOURCE_DESC::Buffer(byteSize);
-	ThrowIfFailed(g_device->CreateCommittedResource(
-		&readbackHeap, D3D12_HEAP_FLAG_NONE, &readbackDesc,
-		D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-		IID_PPV_ARGS(&mReadbackBuffer)));
-
-	// -- 컴퓨트 실행 --
-	g_commandList->SetPipelineState(mComputePSO.Get());
-	g_commandList->SetComputeRootSignature(mComputeRootSignature.Get());		// Compute!
-
-	g_commandList->SetComputeRootShaderResourceView(0, mInputBuffer->GetGPUVirtualAddress());
-	g_commandList->SetComputeRootUnorderedAccessView(1, mOutputBuffer->GetGPUVirtualAddress());
-
-	int numGroups = numElements / 64;		// 128 / 64 = 2 그룹
-	g_commandList->Dispatch(numGroups, 1, 1);
-
-	// 출력 버퍼 -> readback 버퍼 복사
-	auto toCopySrc = CD3DX12_RESOURCE_BARRIER::Transition(mOutputBuffer.Get(),
-		D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-	g_commandList->ResourceBarrier(1, &toCopySrc);
-
-	g_commandList->CopyResource(mReadbackBuffer.Get(), mOutputBuffer.Get());
-
-	// -- 명령 실행 후 대기 --
-	ThrowIfFailed(g_commandList->Close());
-	ID3D12CommandList* cmdsLists[] = { g_commandList.Get() };
-	g_commandQueue->ExecuteCommandLists(_countof(cmdsLists), cmdsLists);
-	FlushCommandQueue();			// GPU 계산 끌날 때까지 대기
-
-	// --결과 읽기--
-	float* mappedData = nullptr;
-	ThrowIfFailed(mReadbackBuffer->Map(0, nullptr, reinterpret_cast<void**>(&mappedData)));
-
-	OutputDebugStringA("===== Compute Test Result =====\n");
-	for (int i = 0; i < numElements; ++i)
-	{
-		std::string line = std::to_string(inputData[i]) + " -> " + std::to_string(mappedData[i]) + "\n";
-		OutputDebugStringA(line.c_str());
-	}
-	mReadbackBuffer->Unmap(0, nullptr);
-
-	// 다음 작업을 위해 커맨드 리스트 다시 읽기
-	ThrowIfFailed(g_commandList->Reset(g_commandAllocator.Get(), nullptr));
 }
 
 // sigma가 클수록 더 흐려짐

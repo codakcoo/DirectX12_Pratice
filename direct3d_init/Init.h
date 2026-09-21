@@ -76,18 +76,13 @@ protected:
 	virtual void OnMouseUp(WPARAM btnState, int x, int y);
 	virtual void OnMouseMove(WPARAM btnState, int x, int y);
 
-	void BuildConstantBuffers();
-	void BuildDescriptorHeaps();
 	void BuildRootSignature();						// 컬러 셰이더 레이아웃 빌드
-	void BuildComputeRootSignature();				// 컴퓨트 셰이더 레이아웃 빌드
 	void BuildBoxGeometry();
-	void BuildFloorGeometry();
 	void BuildFrameResources();
 	void BuildBlurResources();
 	void BuildRenderItems();
 	void BuildShadersAndInputLayout();
 	void BuildPSO();
-	void BuildComputePSO();
 
 	void BuildOffscreenResources();					// 오프스크린용 텍스처 생성
 	void BuildOffscreenViews();						// 오프스크린용 RTV
@@ -100,7 +95,6 @@ protected:
 	void LoadTextures();
 	void BuildSrvHeap();
 
-	void RunComputeTest();
 	std::vector<float> CalcGaussWeights(float sigma);
 
 	D3D12_CPU_DESCRIPTOR_HANDLE OffscreenRtv() const;			// 핸들 접근용 헬퍼
@@ -158,8 +152,6 @@ protected:
 	std::vector<D3D12_INPUT_ELEMENT_DESC> mInputLayout;
 
 	std::unique_ptr<MeshGeometry> mBoxGeo = nullptr;
-	std::unique_ptr<UploadBuffer<ObjectConstants>> mObjectCB = nullptr;
-	ComPtr<ID3D12DescriptorHeap> mCbvHeap = nullptr;
 
 
 	// FrameResource(Allocator 다중화를 위함)
@@ -184,24 +176,10 @@ protected:
 	ComPtr<ID3D12DescriptorHeap> mSrvHeap = nullptr;
 
 	// 블렌딩
-	std::vector<bool> mObjectTransparent;
 	ComPtr<ID3D12PipelineState> mTransparentPSO = nullptr;
 	
-	// 반사
-	std::unique_ptr<MeshGeometry> mFloorGeo = nullptr;
-	ComPtr<ID3D12PipelineState> mMarkStencilPSO = nullptr;				// 바닥에 스텐실 마킹
-	ComPtr<ID3D12PipelineState> mReflectionPSO = nullptr;				// 반사 큐브 (스텐실 통과한 곳만)
 
 	// 컴퓨트
-	ComPtr<ID3D12RootSignature> mComputeRootSignature = nullptr;
-	ComPtr<ID3D12PipelineState> mComputePSO = nullptr;
-	ComPtr<ID3D10Blob> mComputeByteCode = nullptr;
-
-	ComPtr<ID3D12Resource> mInputBuffer = nullptr;
-	ComPtr<ID3D12Resource> mInputUploadBuffer = nullptr;
-	ComPtr<ID3D12Resource> mOutputBuffer = nullptr;
-	ComPtr<ID3D12Resource> mReadbackBuffer = nullptr;
-
 	ComPtr<ID3D12Resource> mBlurMap0 = nullptr;		// 텍스처A
 	ComPtr<ID3D12Resource> mBlurMap1 = nullptr;		// 텍스처B
 
