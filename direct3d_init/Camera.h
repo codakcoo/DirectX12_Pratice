@@ -1,6 +1,8 @@
 #pragma once
 #include <DirectXMath.h>
 
+using namespace DirectX;
+
 class Camera
 {
 public:
@@ -33,13 +35,13 @@ public:
 	DirectX::XMMATRIX GetProj() const;
 
 private:
-	DirectX::XMFLOAT3 mPosition = { 0.0f, 0.0f, 0.0f };
-	DirectX::XMFLOAT3 mPosition = { 0.0f, 0.0f, 0.0f };
-	DirectX::XMFLOAT3 mPosition = { 0.0f, 0.0f, 0.0f };
-	DirectX::XMFLOAT3 mPosition = { 0.0f, 0.0f, 0.0f };
+	DirectX::XMFLOAT3 mPosition		= { 0.0f, 0.0f, 0.0f };
+	DirectX::XMFLOAT3 mRight		= { 1.0f, 0.0f, 0.0f };
+	DirectX::XMFLOAT3 mUp			= { 0.0f, 1.0f, 0.0f };
+	DirectX::XMFLOAT3 mLook			= { 0.0f, 0.0f, 1.0f };
 
-	DirectX::XMFLOAT3 mPosition = { 0.0f, 0.0f, 0.0f };
-	DirectX::XMFLOAT3 mPosition = { 0.0f, 0.0f, 0.0f };
+	DirectX::XMFLOAT4X4 mView;
+	DirectX::XMFLOAT4X4 mProj;
 
 	bool mViewDirty = true;
 };
