@@ -25,7 +25,7 @@ public:
 	void Strafe(float d);			// 좌우
 
 	// 회전 (각도)
-	void Picth(float angle);		// 상하
+	void Pitch(float angle);		// 상하
 	void RotateY(float angle);		// 좌우
 
 	// 뷰 행렬 갱신 (매 프레임 이동/회전 후 호출)
@@ -42,6 +42,8 @@ private:
 
 	DirectX::XMFLOAT4X4 mView;
 	DirectX::XMFLOAT4X4 mProj;
+
+	float mPitchAngle = 0.0f;		// 누적 pitch (제한용)
 
 	bool mViewDirty = true;
 };

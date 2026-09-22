@@ -312,22 +312,23 @@ void Init::Update(const GameTimer& gt)
 		CloseHandle(eventHandle);
 	}
 
-	// 뷰/투영은 공통이니 한 번만
-	// 구면 좌표 -> 데카르트 좌표
-	float x = mCameraRadius * sinf(mCameraPhi) * cosf(mCameraTheta);
-	float z = mCameraRadius * sinf(mCameraPhi) * sinf(mCameraTheta);
-	float y = mCameraRadius * cosf(mCameraPhi);
+	// 카메로 이동 처리 (WASD)
+	OnKeyboardInput(gt);			
 
-	XMVECTOR pos = XMVectorSet(x, y, z, 1.0f);
-	XMVECTOR target = XMVectorZero();									// 원점
-	XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);		// y축이 위쪽
-	XMMATRIX view = XMMatrixLookAtLH(pos, target, up);
-	XMMATRIX proj = XMMatrixPerspectiveFovLH(0.25f * XM_PI, (float)mClientWidth / mClientHeight, 1.0f, 1000.0f);	// 투영 행렬
+	// 카메라 뷰 행렬 갱신
+	mCamera.UpdateViewMatrix();
+
+	XMMATRIX view = mCamera.GetView();
+	XMMATRIX proj = mCamera.GetProj();
+	XMMATRIX viewProj = view * proj;
+
+
+	XMVECTOR pos = mCamera.GetPosition();			// 조명 계산용 카메라 위치
+
 	// 투영 행렬로부터 절두체 생성 (뷰 공간 기준)
 	// 이 절두체는 뷰 공간 기준이다
 	// 카메라가 원점에서 +z를 보는 표준 절두체
 	BoundingFrustum::CreateFromMatrix(mCameraFrustum, proj);
-	XMMATRIX viewProj = view * proj;
 
 	PassConstants passCB;
 	XMStoreFloat4x4(&passCB.ViewProj, XMMatrixTranspose(viewProj));
@@ -681,23 +682,28 @@ void Init::OnMouseMove(WPARAM btnState, int x, int y)
 		float dx = XMConvertToRadians(0.25f * (float)(x - mLastMousePos.x));
 		float dy = XMConvertToRadians(0.25f * (float)(y - mLastMousePos.y));
 
-		mCameraTheta -= dx;
-		mCameraPhi -= dy;
-
-		// phi를 위아래 뒤집힘 방지 범위로 제한
-		mCameraPhi = MathHelper::Clamp(mCameraPhi, 0.1f, XM_PI - 0.1f);
-	}
-	else if ((btnState & MK_RBUTTON) != 0)
-	{
-		// 우클릭 드래그 = 줌
-		float dx = 0.05f * (float)(x - mLastMousePos.x);
-		float dy = 0.05f * (float)(y - mLastMousePos.y);
-		mCameraRadius += dx - dy;
-		mCameraRadius = MathHelper::Clamp(mCameraRadius, 5.0f, 50.0f);
+		mCamera.Pitch(dy);					// 위아래 (마우스 상하)
+		mCamera.RotateY(dx);				// 좌우 (마우스 좌우)
 	}
 
 	mLastMousePos.x = x;
 	mLastMousePos.y = y;
+}
+
+void Init::OnKeyboardInput(const GameTimer& gt)
+{
+	const float dt = gt.DeltaTime();
+	float speed = 20.0f;			// 초당 이동 거리
+
+	if (GetAsyncKeyState('W') & 0x8000)
+		mCamera.Walk(speed * dt);				// 앞
+	if (GetAsyncKeyState('S') & 0x8000)
+		mCamera.Walk(-speed * dt);				// 뒤
+	if (GetAsyncKeyState('A') & 0x8000)
+		mCamera.Strafe(-speed * dt);				// 왼쪽
+	if (GetAsyncKeyState('D') & 0x8000)
+		mCamera.Strafe(speed * dt);				// 오른쪽
+
 }
 
 void Init::BuildRootSignature()
@@ -1341,6 +1347,9 @@ void Init::OnResize()
 	* 10. 가위 직사각형 설정 (명령 목록을 재설정(Reset)하면 가위 직사각형들도 재설정 해야함)
 	*/
 	mScissorRect = { 0, 0, mClientWidth, mClientHeight};
+
+	// 카메라 재설정
+	mCamera.SetLens(0.25f * XM_PI, (float)mClientWidth / mClientHeight, 1.0f, 1000.0f);
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)

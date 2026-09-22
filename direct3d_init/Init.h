@@ -17,6 +17,7 @@
 #include "FrameResource.h"
 #include "GeometryTypes.h"
 #include "DDSTextureLoader.h"
+#include "Camera.h"
 
 
 using Microsoft::WRL::ComPtr;
@@ -75,6 +76,7 @@ protected:
 	virtual void OnMouseDown(WPARAM btnState, int x, int y);
 	virtual void OnMouseUp(WPARAM btnState, int x, int y);
 	virtual void OnMouseMove(WPARAM btnState, int x, int y);
+	void OnKeyboardInput(const GameTimer& gt);
 
 	void BuildRootSignature();						// 컬러 셰이더 레이아웃 빌드
 	void BuildBoxGeometry();
@@ -200,10 +202,8 @@ protected:
 	
 	bool mBlurEnabled = false;
 
-	// 카메라 (구면 좌표 - 마우스로 궤도 회전)
-	float mCameraTheta			= 1.5f * XM_PI;				// 수평 각도
-	float mCameraPhi			= XM_PIDIV4;				// 수직 각도
-	float mCameraRadius			= 30.0f;					// 원점으로부터 거리
+	// 카메라
+	Camera mCamera;
 	POINT mLastMousePos		= { 0, 0 };
 
 	// 컬링
