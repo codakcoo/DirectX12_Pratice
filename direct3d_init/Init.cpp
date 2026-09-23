@@ -480,6 +480,17 @@ void Init::Draw()
 	g_commandList->SetPipelineState(mOpaquePSO.Get());
 	g_commandList->DrawIndexedInstanced(36, mVisibleCount, 0, 0, 0);
 
+	// 스카이박스
+	g_commandList->SetPipelineState(mSkyPSO.Get());
+	// 큐브맵 SRV 바인딩 (슬롯 0의 텍스처 테이블에 큐브맵)
+	CD3DX12_GPU_DESCRIPTOR_HANDLE skyHandle(mSrvHeap->GetGPUDescriptorHandleForHeapStart());
+	skyHandle.Offset(1, g_cbvSrvUavDescriptorSize);					// 슬롯 1 = 큐브맵
+	g_commandList->SetGraphicsRootDescriptorTable(0, skyHandle);
+	// 스카이박스 지오메트리 (박스 재활용)
+	g_commandList->IASetVertexBuffers(0, 1, &vbv);
+	g_commandList->IASetIndexBuffer(&ibv);
+	g_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);			// 인스턴스 1개
+
 	ID3D12Resource* copySource = nullptr;			// 백버퍼로 복사할 소스
 
 	if (mBlurEnabled)
@@ -871,8 +882,11 @@ void Init::BuildRenderItems()
 
 void Init::BuildShadersAndInputLayout()
 {
-	mvsByteCode = d3dUtil::CompileShader(L"Shaders\\color.hlsl", nullptr, "VS", "vs_5_0");
-	mpsByteCode = d3dUtil::CompileShader(L"Shaders\\color.hlsl", nullptr, "PS", "ps_5_0");
+	mShaders["defaultVS"] = d3dUtil::CompileShader(L"Shaders\\color.hlsl", nullptr, "VS", "vs_5_0");
+	mShaders["defaultPS"] = d3dUtil::CompileShader(L"Shaders\\color.hlsl", nullptr, "PS", "ps_5_0");
+
+	mShaders["skyVS"] = d3dUtil::CompileShader(L"Shaders\\sky.hlsl", nullptr, "VS", "vs_5_0");
+	mShaders["skyPS"] = d3dUtil::CompileShader(L"Shaders\\sky.hlsl", nullptr, "PS", "ps_5_0");
 
 	mInputLayout =
 	{
@@ -887,8 +901,16 @@ void Init::BuildPSO()
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC opaquePsoDesc = {};
 	opaquePsoDesc.InputLayout = { mInputLayout.data(), (UINT)mInputLayout.size() };
 	opaquePsoDesc.pRootSignature = mRootSignature.Get();
-	opaquePsoDesc.VS = { reinterpret_cast<BYTE*>(mvsByteCode->GetBufferPointer()), mvsByteCode->GetBufferSize() };
-	opaquePsoDesc.PS = { reinterpret_cast<BYTE*>(mpsByteCode->GetBufferPointer()), mpsByteCode->GetBufferSize() };
+	opaquePsoDesc.VS = 
+	{ 
+		reinterpret_cast<BYTE*>(mShaders["defaultVS"]->GetBufferPointer()), 
+		mShaders["defaultVS"]->GetBufferSize()
+	};
+	opaquePsoDesc.PS = 
+	{ 
+		reinterpret_cast<BYTE*>(mShaders["defaultPS"]->GetBufferPointer()), 
+		mShaders["defaultPS"]->GetBufferSize()
+	};
 	opaquePsoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
 	opaquePsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;	// 뒷면 제거
 	opaquePsoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
@@ -921,6 +943,24 @@ void Init::BuildPSO()
 	transparentPsoDesc.BlendState.RenderTarget[0] = transparentBlendDesc;
 
 	ThrowIfFailed(g_device->CreateGraphicsPipelineState(&transparentPsoDesc, IID_PPV_ARGS(&mTransparentPSO)));
+
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC skyPsoDesc = opaquePsoDesc;
+	// 컬링을 안쪽 면으로 (큐브 안에서 움직이기 때문)
+	skyPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;			// 또는 FRONT
+	// 깊이를 LESS_EQUAL (z=1.0인 스카이박스가 깊이버퍼 claer값 1.0과 같아도 통과)
+	skyPsoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+	skyPsoDesc.VS =
+	{ 
+		reinterpret_cast<BYTE*>(mShaders["skyVS"]->GetBufferPointer()),
+		mShaders["skyVS"]->GetBufferSize()
+	};
+	skyPsoDesc.PS =
+	{
+		reinterpret_cast<BYTE*>(mShaders["skyPS"]->GetBufferPointer()),
+		mShaders["skyPS"]->GetBufferSize()
+	};
+
+	ThrowIfFailed(g_device->CreateGraphicsPipelineState(&skyPsoDesc, IID_PPV_ARGS(&mSkyPSO)));
 }
 
 void Init::BuildOffscreenResources()
@@ -1164,22 +1204,32 @@ void Init::BlurExecute(int blurCount)
 */
 void Init::LoadTextures()
 {
+	// 상자
 	mBoxTex = std::make_unique<Texture>();
 	mBoxTex->name = "boxTex";
 	mBoxTex->Filename = L"Textures\\WoodCrate01.dds";		// 확보한 dds 경로/이름 맞추기
-
 	// CreateDDSTextureFromFile12가 내부 업로드 -> 디폴트 힙 복사 명령을
 	// 커맨드 리스트에 기록함.
 	ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(
 		g_device.Get(), g_commandList.Get(),
 		mBoxTex->Filename.c_str(),
 		mBoxTex->Resource, mBoxTex->UploadHeap));
+
+	// 큐브맵 (배경화면)
+	mSkyTex = std::make_unique<Texture>();
+	mSkyTex->name = "skyTex";
+	mSkyTex->Filename = L"Textures\\grasscube1024.dds";
+	ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(
+		g_device.Get(), g_commandList.Get(),
+		mSkyTex->Filename.c_str(),
+		mSkyTex->Resource, mSkyTex->UploadHeap));
+
 }
 
 void Init::BuildSrvHeap()
 {
 	D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-	srvHeapDesc.NumDescriptors = 1;
+	srvHeapDesc.NumDescriptors = 2;										// 2개 (박스 + 배경)
 	srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 	srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;		// 필수
 	ThrowIfFailed(g_device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&mSrvHeap)));
@@ -1192,8 +1242,22 @@ void Init::BuildSrvHeap()
 	srvDesc.Texture2D.MipLevels = mBoxTex->Resource->GetDesc().MipLevels;
 	srvDesc.Texture2D.ResourceMinLODClamp = 0.0f;
 
+	CD3DX12_CPU_DESCRIPTOR_HANDLE handle(mSrvHeap->GetCPUDescriptorHandleForHeapStart());
+
+	// 슬롯 0: 박스 텍스처
 	g_device->CreateShaderResourceView(mBoxTex->Resource.Get(), &srvDesc,
-		mSrvHeap->GetCPUDescriptorHandleForHeapStart());
+		handle);
+	handle.Offset(1, g_cbvSrvUavDescriptorSize);
+
+	// 슬롯 1: 큐브맵
+	D3D12_SHADER_RESOURCE_VIEW_DESC skyDesc = {};
+	skyDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	skyDesc.Format = mSkyTex->Resource->GetDesc().Format;
+	skyDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;					// 큐브맵
+	skyDesc.TextureCube.MostDetailedMip = 0;
+	skyDesc.TextureCube.MipLevels = mSkyTex->Resource->GetDesc().MipLevels;
+	skyDesc.TextureCube.ResourceMinLODClamp = 0.0f;
+	g_device->CreateShaderResourceView(mSkyTex->Resource.Get(), &skyDesc, handle);
 }
 
 // sigma가 클수록 더 흐려짐
@@ -1349,7 +1413,7 @@ void Init::OnResize()
 	mScissorRect = { 0, 0, mClientWidth, mClientHeight};
 
 	// 카메라 재설정
-	mCamera.SetLens(0.25f * XM_PI, (float)mClientWidth / mClientHeight, 1.0f, 1000.0f);
+	mCamera.SetLens(0.25f * XM_PI, (float)mClientWidth / mClientHeight, 1.0f, 5000.0f);
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)

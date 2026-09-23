@@ -9,6 +9,8 @@
 #include <memory>
 #include <array>
 #include <vector>
+#include <unordered_map>
+#include <string>
 #include "d3dx12.h"
 #include "d3dUtil.h"
 #include "GameTimer.h"
@@ -20,8 +22,9 @@
 #include "Camera.h"
 
 
-using Microsoft::WRL::ComPtr;
+using namespace std;
 using namespace DirectX;
+using Microsoft::WRL::ComPtr;
 //using DirectX::XMFLOAT3;
 //using DirectX::XMFLOAT4;
 
@@ -149,6 +152,8 @@ protected:
 	ComPtr<ID3D12RootSignature> mRootSignature = nullptr;
 	ComPtr<ID3D12PipelineState> mOpaquePSO = nullptr;
 
+	std::unordered_map<string, ComPtr<ID3D10Blob>> mShaders;
+
 	ComPtr<ID3D10Blob> mvsByteCode;
 	ComPtr<ID3D10Blob> mpsByteCode;
 	std::vector<D3D12_INPUT_ELEMENT_DESC> mInputLayout;
@@ -210,4 +215,8 @@ protected:
 	DirectX::BoundingFrustum mCameraFrustum;				// 카메라 절두체 (뷰 공간)
 	int mVisibleCount = 0;									// 이번 프레임에 보이는 큐브 수
 	bool mFrustumCullingEnabled = true;						// 컬링 on/off 토글용
+
+	// 큐브맵 
+	std::unique_ptr<Texture> mSkyTex = nullptr;
+	ComPtr<ID3D12PipelineState> mSkyPSO = nullptr;
 };
