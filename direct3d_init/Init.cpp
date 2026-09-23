@@ -469,6 +469,10 @@ void Init::Draw()
 	D3D12_GPU_VIRTUAL_ADDRESS passCBAddress = mCurrFrameResource->PassCB->Resource()->GetGPUVirtualAddress();
 	g_commandList->SetGraphicsRootConstantBufferView(2, passCBAddress);				// 슬롯 1, 프레임당 한번만
 
+	CD3DX12_GPU_DESCRIPTOR_HANDLE cubeHandle(mSrvHeap->GetGPUDescriptorHandleForHeapStart());
+	cubeHandle.Offset(1, g_cbvSrvUavDescriptorSize);						// 슬롯 1 = 큐브맵
+	g_commandList->SetGraphicsRootDescriptorTable(3, cubeHandle);			// 루트 파라미터
+
 	// 정점/인덱스
 	auto vbv = mBoxGeo->VertexBufferView();
 	auto ibv = mBoxGeo->IndexBufferView();
@@ -490,6 +494,7 @@ void Init::Draw()
 	g_commandList->IASetVertexBuffers(0, 1, &vbv);
 	g_commandList->IASetIndexBuffer(&ibv);
 	g_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);			// 인스턴스 1개
+
 
 	ID3D12Resource* copySource = nullptr;			// 백버퍼로 복사할 소스
 
@@ -720,13 +725,17 @@ void Init::OnKeyboardInput(const GameTimer& gt)
 void Init::BuildRootSignature()
 {
 	CD3DX12_DESCRIPTOR_RANGE texTable;
-	texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);		// t0 (텍스처)
+	texTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);		// t0(박스)
+
+	CD3DX12_DESCRIPTOR_RANGE cubeTable;
+	cubeTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 2);		// t2(큐브맵)
 	
 	// cbv의 힙을 사용하지 않고 루트 디스크립터 방식으로 GPU 주소로 바로 때려박기 때문에 heap(공간), table(참조)를 안만들어도 됨.
-	CD3DX12_ROOT_PARAMETER slotRootParameter[3];
+	CD3DX12_ROOT_PARAMETER slotRootParameter[4];
 	slotRootParameter[0].InitAsDescriptorTable(1, &texTable, D3D12_SHADER_VISIBILITY_PIXEL);		// t0 텍스처	
-	slotRootParameter[1].InitAsShaderResourceView(1);			// t1 - 물체별 (1)은 레지스터 t1을 뜻함.
-	slotRootParameter[2].InitAsConstantBufferView(1);			// b1 - 패스별
+	slotRootParameter[1].InitAsShaderResourceView(1);												// t1 - 물체별 (1)은 레지스터 t1을 뜻함.
+	slotRootParameter[2].InitAsConstantBufferView(1);												// b1 - 패스별
+	slotRootParameter[3].InitAsDescriptorTable(1, &cubeTable, D3D12_SHADER_VISIBILITY_PIXEL);		// t2 큐브맵
 
 	// 정적 샘플러 - 지난번 얘기한 그 방식, 별도 힙 불필요
 	CD3DX12_STATIC_SAMPLER_DESC linearWrap(
@@ -735,7 +744,7 @@ void Init::BuildRootSignature()
 		D3D12_TEXTURE_ADDRESS_MODE_WRAP,
 		D3D12_TEXTURE_ADDRESS_MODE_WRAP);
 
-	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(3, slotRootParameter, 1, &linearWrap, 
+	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(4, slotRootParameter, 1, &linearWrap, 
 		D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
 	ComPtr<ID3DBlob> serializedRootSig = nullptr;

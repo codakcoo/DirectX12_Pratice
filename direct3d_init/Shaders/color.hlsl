@@ -1,11 +1,24 @@
 #define MaxLights 16
 
+/*
+* 1. 카메라에서 표면으로 향하는 시선 벡터
+* 2. 표면 노멀로 그 시선을 반사시킨 벡터
+* 3. 그 반사 벡터 방향으로 큐브맵(하늘)을 조회 -> 그 방향의 하늘이 표면에 비침
+*    reflect(시선, 노멀)이 반사 벡터를 계산함
+*/
+
 struct InstanceData
 {
     float4x4 World;
 };
 
+
+Texture2D gDiffuseMap : register(t0);
+TextureCube gCubeMap : register(t2);                    // 환경맵
+SamplerState gsamLinear : register(s0);
+
 StructuredBuffer<InstanceData> gInstanceData : register(t1);
+
 
 struct Light
 {
@@ -25,9 +38,6 @@ cbuffer cbPass : register(b1)
     float4 gAmbientLight;
     Light gLights[MaxLights];
 };
-
-Texture2D       gDiffuseMap : register(t0);
-SamplerState    gsamLinear : register(s0);
 
 struct VertexIn
 {
@@ -71,8 +81,16 @@ float4 PS(VertexOut pin) : SV_TARGET
     
     float3 diffuse = gLights[0].Strength * ndotl * diffuseAlbedo.rgb;
     float3 ambient = gAmbientLight.rgb * diffuseAlbedo.rgb;
-    
     float3 litColor = ambient + diffuse;
     
+    // --환경 반사--
+    float3 toEye = normalize(pin.PosW - gEyePosW); // 카메라 -> 표면 방향
+    float3 reflectVec = reflect(toEye, normal);
+    float4 reflectionColor = gCubeMap.Sample(gsamLinear, reflectVec);
+    
+    // 반사를 섞음 (30%)
+    litColor += 0.3f * reflectionColor.rgb;
+    
     return float4(litColor, diffuseAlbedo.a);
+
 }
