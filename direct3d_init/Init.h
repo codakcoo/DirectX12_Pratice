@@ -219,4 +219,7 @@ protected:
 	// Å¥ºê¸Ê 
 	std::unique_ptr<Texture> mSkyTex = nullptr;
 	ComPtr<ID3D12PipelineState> mSkyPSO = nullptr;
+
+	// ³ë¸Ö¸Ê
+	std::unique_ptr<Texture> mNormalTex = nullptr;
 };

@@ -469,9 +469,15 @@ void Init::Draw()
 	D3D12_GPU_VIRTUAL_ADDRESS passCBAddress = mCurrFrameResource->PassCB->Resource()->GetGPUVirtualAddress();
 	g_commandList->SetGraphicsRootConstantBufferView(2, passCBAddress);				// 슬롯 1, 프레임당 한번만
 
+	// 큐브맵
 	CD3DX12_GPU_DESCRIPTOR_HANDLE cubeHandle(mSrvHeap->GetGPUDescriptorHandleForHeapStart());
 	cubeHandle.Offset(1, g_cbvSrvUavDescriptorSize);						// 슬롯 1 = 큐브맵
 	g_commandList->SetGraphicsRootDescriptorTable(3, cubeHandle);			// 루트 파라미터
+
+	// 노멀맵
+	CD3DX12_GPU_DESCRIPTOR_HANDLE normalHandle(mSrvHeap->GetGPUDescriptorHandleForHeapStart());
+	normalHandle.Offset(2, g_cbvSrvUavDescriptorSize);						// 슬롯 2 = 노멀맵
+	g_commandList->SetGraphicsRootDescriptorTable(4, normalHandle);			// 루트 파라미터 4 = t3
 
 	// 정점/인덱스
 	auto vbv = mBoxGeo->VertexBufferView();
@@ -729,13 +735,17 @@ void Init::BuildRootSignature()
 
 	CD3DX12_DESCRIPTOR_RANGE cubeTable;
 	cubeTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 2);		// t2(큐브맵)
+
+	CD3DX12_DESCRIPTOR_RANGE normalTable;
+	normalTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 3);	// t3(노멀맵)
 	
 	// cbv의 힙을 사용하지 않고 루트 디스크립터 방식으로 GPU 주소로 바로 때려박기 때문에 heap(공간), table(참조)를 안만들어도 됨.
-	CD3DX12_ROOT_PARAMETER slotRootParameter[4];
+	CD3DX12_ROOT_PARAMETER slotRootParameter[5];
 	slotRootParameter[0].InitAsDescriptorTable(1, &texTable, D3D12_SHADER_VISIBILITY_PIXEL);		// t0 텍스처	
 	slotRootParameter[1].InitAsShaderResourceView(1);												// t1 - 물체별 (1)은 레지스터 t1을 뜻함.
 	slotRootParameter[2].InitAsConstantBufferView(1);												// b1 - 패스별
 	slotRootParameter[3].InitAsDescriptorTable(1, &cubeTable, D3D12_SHADER_VISIBILITY_PIXEL);		// t2 큐브맵
+	slotRootParameter[4].InitAsDescriptorTable(1, &normalTable, D3D12_SHADER_VISIBILITY_PIXEL);		// t3 노멀맵
 
 	// 정적 샘플러 - 지난번 얘기한 그 방식, 별도 힙 불필요
 	CD3DX12_STATIC_SAMPLER_DESC linearWrap(
@@ -744,7 +754,7 @@ void Init::BuildRootSignature()
 		D3D12_TEXTURE_ADDRESS_MODE_WRAP,
 		D3D12_TEXTURE_ADDRESS_MODE_WRAP);
 
-	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(4, slotRootParameter, 1, &linearWrap, 
+	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(5, slotRootParameter, 1, &linearWrap, 
 		D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
 	ComPtr<ID3DBlob> serializedRootSig = nullptr;
@@ -767,35 +777,35 @@ void Init::BuildBoxGeometry()
 	std::array<Vertex, 24> vertices =
 	{
 		// 앞면
-		Vertex({ XMFLOAT3(-1,-1,-1), XMFLOAT3(0,0,-1), XMFLOAT2(0.0f, 1.0f) }),
-		Vertex({ XMFLOAT3(-1,+1,-1), XMFLOAT3(0,0,-1), XMFLOAT2(0.0f, 0.0f) }),
-		Vertex({ XMFLOAT3(+1,+1,-1), XMFLOAT3(0,0,-1), XMFLOAT2(1.0f, 0.0f) }),
-		Vertex({ XMFLOAT3(+1,-1,-1), XMFLOAT3(0,0,-1), XMFLOAT2(1.0f, 1.0f) }),
+		Vertex({ XMFLOAT3(-1,-1,-1), XMFLOAT3(0,0,-1), XMFLOAT2(0.0f, 1.0f), XMFLOAT3(+1,0,0) }),
+		Vertex({ XMFLOAT3(-1,+1,-1), XMFLOAT3(0,0,-1), XMFLOAT2(0.0f, 0.0f), XMFLOAT3(+1,0,0) }),
+		Vertex({ XMFLOAT3(+1,+1,-1), XMFLOAT3(0,0,-1), XMFLOAT2(1.0f, 0.0f), XMFLOAT3(+1,0,0) }),
+		Vertex({ XMFLOAT3(+1,-1,-1), XMFLOAT3(0,0,-1), XMFLOAT2(1.0f, 1.0f), XMFLOAT3(+1,0,0) }),
 		// 뒷면
-		Vertex({ XMFLOAT3(-1,-1,+1), XMFLOAT3(0,0,1), XMFLOAT2(1.0f, 1.0f) }),
-		Vertex({ XMFLOAT3(+1,-1,+1), XMFLOAT3(0,0,1), XMFLOAT2(0.0f, 1.0f) }),
-		Vertex({ XMFLOAT3(+1,+1,+1), XMFLOAT3(0,0,1), XMFLOAT2(0.0f, 0.0f) }),
-		Vertex({ XMFLOAT3(-1,+1,+1), XMFLOAT3(0,0,1), XMFLOAT2(1.0f, 0.0f) }),
+		Vertex({ XMFLOAT3(-1,-1,+1), XMFLOAT3(0,0,+1), XMFLOAT2(1.0f, 1.0f), XMFLOAT3(-1,0,0) }),
+		Vertex({ XMFLOAT3(+1,-1,+1), XMFLOAT3(0,0,+1), XMFLOAT2(0.0f, 1.0f), XMFLOAT3(-1,0,0) }),
+		Vertex({ XMFLOAT3(+1,+1,+1), XMFLOAT3(0,0,+1), XMFLOAT2(0.0f, 0.0f), XMFLOAT3(-1,0,0) }),
+		Vertex({ XMFLOAT3(-1,+1,+1), XMFLOAT3(0,0,+1), XMFLOAT2(1.0f, 0.0f), XMFLOAT3(-1,0,0) }),
 		// 윗면
-		Vertex({ XMFLOAT3(-1,+1,-1), XMFLOAT3(0,1,0), XMFLOAT2(0.0f, 1.0f) }),
-		Vertex({ XMFLOAT3(-1,+1,+1), XMFLOAT3(0,1,0), XMFLOAT2(0.0f, 0.0f) }),
-		Vertex({ XMFLOAT3(+1,+1,+1), XMFLOAT3(0,1,0), XMFLOAT2(1.0f, 0.0f) }),
-		Vertex({ XMFLOAT3(+1,+1,-1), XMFLOAT3(0,1,0), XMFLOAT2(1.0f, 1.0f) }),
+		Vertex({ XMFLOAT3(-1,+1,-1), XMFLOAT3(0,+1,0), XMFLOAT2(0.0f, 1.0f), XMFLOAT3(+1,0,0) }),
+		Vertex({ XMFLOAT3(-1,+1,+1), XMFLOAT3(0,+1,0), XMFLOAT2(0.0f, 0.0f), XMFLOAT3(+1,0,0) }),
+		Vertex({ XMFLOAT3(+1,+1,+1), XMFLOAT3(0,+1,0), XMFLOAT2(1.0f, 0.0f), XMFLOAT3(+1,0,0) }),
+		Vertex({ XMFLOAT3(+1,+1,-1), XMFLOAT3(0,+1,0), XMFLOAT2(1.0f, 1.0f), XMFLOAT3(+1,0,0) }),
 		// 아랫면
-		Vertex({ XMFLOAT3(-1,-1,-1), XMFLOAT3(0,-1,0), XMFLOAT2(0.0f, 1.0f) }),
-		Vertex({ XMFLOAT3(+1,-1,-1), XMFLOAT3(0,-1,0), XMFLOAT2(0.0f, 0.0f) }),
-		Vertex({ XMFLOAT3(+1,-1,+1), XMFLOAT3(0,-1,0), XMFLOAT2(1.0f, 0.0f) }),
-		Vertex({ XMFLOAT3(-1,-1,+1), XMFLOAT3(0,-1,0), XMFLOAT2(1.0f, 1.0f) }),
+		Vertex({ XMFLOAT3(-1,-1,-1), XMFLOAT3(0,-1,0), XMFLOAT2(0.0f, 1.0f), XMFLOAT3(0,0,+1) }),
+		Vertex({ XMFLOAT3(+1,-1,-1), XMFLOAT3(0,-1,0), XMFLOAT2(0.0f, 0.0f), XMFLOAT3(0,0,+1) }),
+		Vertex({ XMFLOAT3(+1,-1,+1), XMFLOAT3(0,-1,0), XMFLOAT2(1.0f, 0.0f), XMFLOAT3(0,0,+1) }),
+		Vertex({ XMFLOAT3(-1,-1,+1), XMFLOAT3(0,-1,0), XMFLOAT2(1.0f, 1.0f), XMFLOAT3(0,0,+1) }),
 		// 왼쪽면
-		Vertex({ XMFLOAT3(-1,-1,+1), XMFLOAT3(-1,0,0), XMFLOAT2(1.0f, 1.0f) }),
-		Vertex({ XMFLOAT3(-1,+1,+1), XMFLOAT3(-1,0,0), XMFLOAT2(0.0f, 1.0f) }),
-		Vertex({ XMFLOAT3(-1,+1,-1), XMFLOAT3(-1,0,0), XMFLOAT2(0.0f, 0.0f) }),
-		Vertex({ XMFLOAT3(-1,-1,-1), XMFLOAT3(-1,0,0), XMFLOAT2(1.0f, 0.0f) }),
+		Vertex({ XMFLOAT3(-1,-1,+1), XMFLOAT3(-1,0,0), XMFLOAT2(0.0f, 1.0f), XMFLOAT3(0,0,-1) }),
+		Vertex({ XMFLOAT3(-1,+1,+1), XMFLOAT3(-1,0,0), XMFLOAT2(0.0f, 0.0f), XMFLOAT3(0,0,-1) }),
+		Vertex({ XMFLOAT3(-1,+1,-1), XMFLOAT3(-1,0,0), XMFLOAT2(1.0f, 0.0f), XMFLOAT3(0,0,-1) }),
+		Vertex({ XMFLOAT3(-1,-1,-1), XMFLOAT3(-1,0,0), XMFLOAT2(1.0f, 1.0f), XMFLOAT3(0,0,-1) }),
 		// 오른쪽면
-		Vertex({ XMFLOAT3(+1,-1,-1), XMFLOAT3(1,0,0), XMFLOAT2(0.0f, 1.0f) }),
-		Vertex({ XMFLOAT3(+1,+1,-1), XMFLOAT3(1,0,0), XMFLOAT2(0.0f, 0.0f) }),
-		Vertex({ XMFLOAT3(+1,+1,+1), XMFLOAT3(1,0,0), XMFLOAT2(1.0f, 0.0f) }),
-		Vertex({ XMFLOAT3(+1,-1,+1), XMFLOAT3(1,0,0), XMFLOAT2(1.0f, 1.0f) }),
+		Vertex({ XMFLOAT3(+1,-1,-1), XMFLOAT3(+1,0,0), XMFLOAT2(0.0f, 1.0f), XMFLOAT3(0,0,+1) }),
+		Vertex({ XMFLOAT3(+1,+1,-1), XMFLOAT3(+1,0,0), XMFLOAT2(0.0f, 0.0f), XMFLOAT3(0,0,+1) }),
+		Vertex({ XMFLOAT3(+1,+1,+1), XMFLOAT3(+1,0,0), XMFLOAT2(1.0f, 0.0f), XMFLOAT3(0,0,+1) }),
+		Vertex({ XMFLOAT3(+1,-1,+1), XMFLOAT3(+1,0,0), XMFLOAT2(1.0f, 1.0f), XMFLOAT3(0,0,+1) }),
 	};
 
 	std::array<std::uint16_t, 36> indices =
@@ -899,9 +909,10 @@ void Init::BuildShadersAndInputLayout()
 
 	mInputLayout =
 	{
-		{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-		{ "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(Vertex, Normal), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, offsetof(Vertex, TexC), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+		{ "POSITION",	0,	DXGI_FORMAT_R32G32B32_FLOAT,	0,	0,							D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "NORMAL",		0,	DXGI_FORMAT_R32G32B32_FLOAT,	0,	offsetof(Vertex, Normal),	D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD",	0,	DXGI_FORMAT_R32G32_FLOAT,		0,	offsetof(Vertex, TexC),		D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TANGENT",	0,	DXGI_FORMAT_R32G32B32_FLOAT, 0,	offsetof(Vertex, TangentU),	D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
 	};
 }
 
@@ -1216,7 +1227,7 @@ void Init::LoadTextures()
 	// 상자
 	mBoxTex = std::make_unique<Texture>();
 	mBoxTex->name = "boxTex";
-	mBoxTex->Filename = L"Textures\\WoodCrate01.dds";		// 확보한 dds 경로/이름 맞추기
+	mBoxTex->Filename = L"Textures\\bricks.dds";		// 확보한 dds 경로/이름 맞추기
 	// CreateDDSTextureFromFile12가 내부 업로드 -> 디폴트 힙 복사 명령을
 	// 커맨드 리스트에 기록함.
 	ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(
@@ -1233,12 +1244,19 @@ void Init::LoadTextures()
 		mSkyTex->Filename.c_str(),
 		mSkyTex->Resource, mSkyTex->UploadHeap));
 
+	mNormalTex = std::make_unique<Texture>();
+	mNormalTex->name = "normalTex";
+	mNormalTex->Filename = L"Textures\\bricks_nmap.dds";
+	ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(
+		g_device.Get(), g_commandList.Get(),
+		mNormalTex->Filename.c_str(),
+		mNormalTex->Resource, mNormalTex->UploadHeap));
 }
 
 void Init::BuildSrvHeap()
 {
 	D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-	srvHeapDesc.NumDescriptors = 2;										// 2개 (박스 + 배경)
+	srvHeapDesc.NumDescriptors = 3;										// 2개 (박스 + 배경)
 	srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 	srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;		// 필수
 	ThrowIfFailed(g_device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&mSrvHeap)));
@@ -1267,6 +1285,13 @@ void Init::BuildSrvHeap()
 	skyDesc.TextureCube.MipLevels = mSkyTex->Resource->GetDesc().MipLevels;
 	skyDesc.TextureCube.ResourceMinLODClamp = 0.0f;
 	g_device->CreateShaderResourceView(mSkyTex->Resource.Get(), &skyDesc, handle);
+
+	// 슬롯 2: 노멀맵
+	handle.Offset(1, g_cbvSrvUavDescriptorSize);
+	D3D12_SHADER_RESOURCE_VIEW_DESC nDesc = srvDesc;						// Texture2D 설정 재사용
+	nDesc.Format = mNormalTex->Resource->GetDesc().Format;
+	nDesc.Texture2D.MipLevels = mNormalTex->Resource->GetDesc().MipLevels;
+	g_device->CreateShaderResourceView(mNormalTex->Resource.Get(), &nDesc, handle);
 }
 
 // sigma가 클수록 더 흐려짐
