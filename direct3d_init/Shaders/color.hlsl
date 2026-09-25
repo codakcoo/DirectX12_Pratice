@@ -95,8 +95,8 @@ float4 PS(VertexOut pin) : SV_TARGET
     float4 diffuseAlbedo = gDiffuseMap.Sample(gsamLinear, pin.TexC);
     
     // 노멀맵에서 노멀 읽어서 월드 공간으로
-    float3 normalMapSample = gNormalMap.Sample(gsamLinear, pin.TexC).rgb;
-    float3 bumpNormalW = NormalSampleToWorldSpace(normalMapSample, normalize(pin.NormalW), pin.TangentW);
+    float4 normalMapSample = gNormalMap.Sample(gsamLinear, pin.TexC);                                           // float4 -> rgb에서 rgba로
+    float3 bumpNormalW = NormalSampleToWorldSpace(normalMapSample.rgb, normalize(pin.NormalW), pin.TangentW);
     
     float3 lightDir = normalize(-gLights[0].Direction);
     float ndotl = max(dot(bumpNormalW, lightDir), 0.0f);
@@ -109,18 +109,21 @@ float4 PS(VertexOut pin) : SV_TARGET
     float3 toEyeW = normalize(gEyePosW - pin.PosW);     // 표면 -> 카메라
     float3 halfVec = normalize(lightDir + toEyeW);      // 하프 벡터
 
-    const float shininess = 16.0f;                      // 확인용으로 넓게 64->16
+    const float shininess = 64.0f;                      // 확인용으로 넓게 64->16
     float spec = pow(max(dot(bumpNormalW, halfVec), 0.0f), shininess);
     spec *= (ndotl > 0.0f);                             // 빛 반대쪽 면에는 하이라이트 없음
-    float3 specular = gLights[0].Strength * spec * 0.5f;
+    
+    float glossMask = normalMapSample.a;
+    float3 specular = gLights[0].Strength * spec * glossMask;
 
     float3 litColor = ambient + diffuse + specular;
 
     // -- 환경 반사--
     float3 r = reflect(-toEyeW, bumpNormalW);           // 카메라->표면 방향으로 넣어야 함
-    litColor += 0.3f * gCubeMap.Sample(gsamLinear, r).rgb;      // 반사율 30%
+    litColor += 0.3f * glossMask * gCubeMap.Sample(gsamLinear, r).rgb;      // 반사율 30%
     
-    //return float4(specular, 1.0f);                      // 하이라트 시각화 
-    //return float4(bumpNormalW * 0.5f + 0.5f, 1.0f);   // 노멀 시각화
+    //return float4(bumpNormalW * 0.5f + 0.5f, 1.0f);       // 노멀 시각화
+    //return float4(glossMask.xxx, 1.0f);                     // 마스크 시각화
+    //return float4(specular, 1.0f);                        // 하이라트 시각화 
     return float4(litColor, diffuseAlbedo.a);
 }
