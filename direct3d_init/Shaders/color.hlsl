@@ -13,10 +13,13 @@ struct InstanceData
 };
 
 
-Texture2D gDiffuseMap   : register(t0);
-TextureCube gCubeMap    : register(t2);                    // 환경맵
-Texture2D gNormalMap    : register(t3);                    // 노멀맵
-SamplerState gsamLinear : register(s0);
+Texture2D gDiffuseMap                       : register(t0);
+TextureCube gCubeMap                        : register(t2);                    // 환경맵
+Texture2D gNormalMap                        : register(t3);                    // 노멀맵
+Texture2D gShadowMap                        : register(t4);                    // 섀도맵
+StructuredBuffer<uint> gVisibleIndices      : register(t5);
+SamplerState gsamLinear                     : register(s0);
+SamplerComparisonState gsamShadow           : register(s1);
 
 StructuredBuffer<InstanceData> gInstanceData : register(t1);
 
@@ -38,6 +41,14 @@ cbuffer cbPass : register(b1)
     float cbPerObjectPad1;
     float4 gAmbientLight;
     Light gLights[MaxLights];
+    
+    float4x4 gLightViewProj;
+    float4x4 gShadowTransform;
+};
+
+cbuffer cbView : register(b2)
+{
+    uint gIndexOffset;
 };
 
 struct VertexIn
@@ -50,11 +61,12 @@ struct VertexIn
 
 struct VertexOut
 {
-    float4 PosH     : SV_POSITION;
-    float3 PosW     : POSITION;
-    float3 NormalW  : NORMAL;
-    float3 TangentW : TANGENT;
-    float2 TexC     : TEXCOORD;
+    float4 PosH         : SV_POSITION;
+    float3 PosW         : POSITION;
+    float3 NormalW      : NORMAL;
+    float3 TangentW     : TANGENT;
+    float2 TexC         : TEXCOORD;
+    float4 ShadowPosH   : POSITION1;      // 섀도맵 UV 공간 좌표
 };
 
 float3 NormalSampleToWorldSpace(float3 normalMapSample, float3 unitNormalW, float3 tangentW)
@@ -73,11 +85,36 @@ float3 NormalSampleToWorldSpace(float3 normalMapSample, float3 unitNormalW, floa
     return mul(normalT, TBN);
 }
 
+float CalcShadowFactor(float4 shadowPosH)
+{
+    shadowPosH.xyz /= shadowPosH.w;                                 // 직교 투영이면 w=1이지만 습관적으로
+    float depth = shadowPosH.z;                                     // 라이트 기준 내 깊이
+    
+    uint width, height, numMips;
+    gShadowMap.GetDimensions(0, width, height, numMips);
+    float dx = 1.0f / (float) width;                                // 텍셀 1칸
+    
+    const float2 offsets[9] =
+    {
+        float2(-dx, -dx),   float2(0.0f, -dx),  float2(dx, -dx),
+        float2(-dx, 0.0f),  float2(0.0f, 0.0f), float2(dx, 0.0f),
+        float2(-dx, +dx),   float2(0.0f, +dx),  float2(dx, +dx)
+    };
+
+    float percentLit = 0.0f;
+    [unroll]
+    for (int i = 0; i < 9; i++)
+        percentLit += gShadowMap.SampleCmpLevelZero(gsamShadow, shadowPosH.xy + offsets[i], depth).r;
+    
+    return percentLit / 9.0f;
+}
+
 VertexOut VS(VertexIn vin, uint instanceID : SV_InstanceID)
 {
     VertexOut vout;
     
-    float4x4 world = gInstanceData[instanceID].World; // 내 인스턴스 행렬 골라 읽기
+    uint idx = gVisibleIndices[gIndexOffset + instanceID];
+    float4x4 world = gInstanceData[idx].World; // 내 인스턴스 행렬 골라 읽기
     
     float4 posW = mul(float4(vin.PosL, 1.0f), world);
     vout.PosW = posW.xyz;
@@ -86,6 +123,7 @@ VertexOut VS(VertexIn vin, uint instanceID : SV_InstanceID)
     vout.TangentW = mul(vin.TangentU, (float3x3) world);
     vout.PosH = mul(posW, gViewProj);
     vout.TexC = vin.TexC;
+    vout.ShadowPosH = mul(posW, gShadowTransform);
     
     return vout;
 }
@@ -100,10 +138,11 @@ float4 PS(VertexOut pin) : SV_TARGET
     
     float3 lightDir = normalize(-gLights[0].Direction);
     float ndotl = max(dot(bumpNormalW, lightDir), 0.0f);
-    // 매우 단순화한 디렉셔널 라이트 (Lambert 확산 반사만)
+   
+    float shadowFactor = CalcShadowFactor(pin.ShadowPosH);
     
-    float3 diffuse = gLights[0].Strength * ndotl * diffuseAlbedo.rgb;
-    float3 ambient = gAmbientLight.rgb * diffuseAlbedo.rgb;
+    float3 diffuse = shadowFactor * gLights[0].Strength * ndotl * diffuseAlbedo.rgb;
+    float3 ambient = gAmbientLight.rgb * diffuseAlbedo.rgb;                                         // ambient, 환경 반사는 그대로 (그림자 안에서도 보여야함)
     
     // --스페큘러(Blinn-Phong)--
     float3 toEyeW = normalize(gEyePosW - pin.PosW);     // 표면 -> 카메라
@@ -114,7 +153,7 @@ float4 PS(VertexOut pin) : SV_TARGET
     spec *= (ndotl > 0.0f);                             // 빛 반대쪽 면에는 하이라이트 없음
     
     float glossMask = normalMapSample.a;
-    float3 specular = gLights[0].Strength * spec * glossMask;
+    float3 specular = shadowFactor * gLights[0].Strength * spec * glossMask;
 
     float3 litColor = ambient + diffuse + specular;
 
@@ -122,8 +161,9 @@ float4 PS(VertexOut pin) : SV_TARGET
     float3 r = reflect(-toEyeW, bumpNormalW);           // 카메라->표면 방향으로 넣어야 함
     litColor += 0.3f * glossMask * gCubeMap.Sample(gsamLinear, r).rgb;      // 반사율 30%
     
-    //return float4(bumpNormalW * 0.5f + 0.5f, 1.0f);       // 노멀 시각화
-    //return float4(glossMask.xxx, 1.0f);                     // 마스크 시각화
-    //return float4(specular, 1.0f);                        // 하이라트 시각화 
+    //return float4(bumpNormalW * 0.5f + 0.5f, 1.0f);           // 노멀 시각화
+    //return float4(glossMask.xxx, 1.0f);                       // 마스크 시각화
+    //return float4(specular, 1.0f);                            // 하이라트 시각화 
+    //return float4(shadowFactor.xxx, 1.0f);                    // 섀도우 시각화
     return float4(litColor, diffuseAlbedo.a);
 }

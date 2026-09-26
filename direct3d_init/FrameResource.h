@@ -27,6 +27,7 @@ public:
 
 	std::unique_ptr<UploadBuffer<PassConstants>> PassCB = nullptr;
 	std::unique_ptr<UploadBuffer<InstanceData>> InstanceBuffer = nullptr;
+	std::unique_ptr<UploadBuffer<UINT>> VisibleIndexBuffer = nullptr;
 
 
 	// 이 프레임의 명령이 GPU에서 완료됐는지 확인할 펜스 값

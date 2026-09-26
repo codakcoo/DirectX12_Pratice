@@ -88,5 +88,8 @@
     <None Include="Shaders\sky.hlsl">
       <Filter>Shaders</Filter>
     </None>
+    <None Include="Shaders\shadow.hlsl">
+      <Filter>Shaders</Filter>
+    </None>
   </ItemGroup>
 </Project>

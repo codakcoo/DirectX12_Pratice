@@ -274,6 +274,7 @@ bool Init::InitD3D()
 
 	LoadTextures();
 	BuildRootSignature();						// 루트 서명 생성
+	BuildShadowMapResource();					// BuildSrvHeap보다 먼저 (SRV가 리소스를 참조하므로)
 	BuildSrvHeap();								// LoadTextures() 다음에
 	BuildShadersAndInputLayout();				// 쉐이더와 입력 레이아웃 생성
 	BuildBoxGeometry();							// 박스 지오메트리 생성, 여기서 정점/인덱스 버퍼 업로드 명령 기록
@@ -338,13 +339,39 @@ void Init::Update(const GameTimer& gt)
 	passCB.Lights[0].Direction = { 0.57735f, -0.57735f, 0.57735f };
 	passCB.Lights[0].Strength = { 0.8f, 0.8f, 0.7f };
 
+	// -- 섀도 행렬 --
+	// 씬 경게구 : 큐브가 -16~13 범위라 반경 30이면 전체를 덮음
+	const float sceneRadius = 30.0f;
+	XMVECTOR sceneCenter = XMVectorZero();
+
+	XMVECTOR lightDir = XMLoadFloat3(&passCB.Lights[0].Direction);
+	XMVECTOR lightPos = -2.0f * sceneRadius * lightDir;
+	XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+	XMMATRIX lightView = XMMatrixLookAtLH(lightPos, sceneCenter, up);
+
+	// 경계구를 라이트 공간으로 옮겨서 딱 맞는 직교 투영
+	XMFLOAT3 c;
+	XMStoreFloat3(&c, XMVector3TransformCoord(sceneCenter, lightView));
+	XMMATRIX lightProj = XMMatrixOrthographicOffCenterLH(
+		c.x - sceneRadius, c.x + sceneRadius,
+		c.y - sceneRadius, c.y + sceneRadius,
+		c.z - sceneRadius, c.z + sceneRadius);
+
+	// NDC [-1,1] -> 텍스처 UV [0,1] (y 뒤집기)
+	XMMATRIX T(
+		0.5f,  0.0f, 0.0f, 0.0f,
+		0.0f, -0.5f, 0.0f, 0.0f,
+		0.0f,  0.0f, 1.0f, 0.0f,
+		0.5f,  0.5f, 0.0f, 1.0f);
+
+	XMMATRIX lightViewProj = lightView * lightProj;
+	XMStoreFloat4x4(&passCB.LightViewProj, XMMatrixTranspose(lightViewProj));
+	XMStoreFloat4x4(&passCB.ShadowTransform, XMMatrixTranspose(lightViewProj * T));
+
 	mCurrFrameResource->PassCB->CopyData(0, passCB);						// 패스는 슬롯 1개
 
-	// 뷰 행렬의 역행렬 (월드 -> 뷰 변환용)
-	XMVECTOR viewDet = XMMatrixDeterminant(view);
-	XMMATRIX invView = XMMatrixInverse(&viewDet, view);
-
 	int visibleIdx = 0;					// 인스턴스 버퍼에 실제로 채운 개수
+	int shadowIdx = 0;
 
 	// 물체마다 개별 계산해서 각자의 슬롯(index)에 복사
 	for (int i = 0; i < NumObjects; ++i)
@@ -354,7 +381,15 @@ void Init::Update(const GameTimer& gt)
 		XMMATRIX spin = XMMatrixRotationY(mObjectThetas[i]);
 		XMMATRIX world = spin * baseTranslate;									// 자전 후 배치 위치로 이동
 
-		// -- 컬링 검사 --
+		// -- GPU Scene: 컬링과 무관하게 항상 자기 슬롯(i)에 --
+		InstanceData data;
+		XMStoreFloat4x4(&data.World, XMMatrixTranspose(world));
+		mCurrFrameResource->InstanceBuffer->CopyData(i, data);
+
+		// -- 섀도 뷰: 지금은 전부 (다음 단계에서 라이트 박스로 컬링)
+		mCurrFrameResource->VisibleIndexBuffer->CopyData(shadowIdx++, (UINT)i);
+
+		// -- 카메라 뷰: 프리스텀 컬링 --
 		if (mFrustumCullingEnabled)
 		{
 			// 큐브의 로컬 AABBb (큐브가 +-1 크기니까 중심 원점, 반경1)
@@ -362,29 +397,19 @@ void Init::Update(const GameTimer& gt)
 			localBox.Center = { 0.0f, 0.0f, 0.0f };
 			localBox.Extents = { 1.0f, 1.0f, 1.0f };
 
-			// world -> view 변환 행렬 (큐브를 뷰 공간으로)
-			XMVECTOR worldDet = XMMatrixDeterminant(world);
-			XMMATRIX invWorld = XMMatrixInverse(&worldDet, world);
-			// 절두체를 큐브의 로컬 공간으로 가져오는 변환: invWorld * view의 역
-			// 더 간단히: 큐브 박스를 뷰공간으로 옮겨서 절두체와 비교
 
-			XMMATRIX worldToView = world * view;
 			BoundingBox viewBox;
-			localBox.Transform(viewBox, worldToView);				// 큐브 박스를 뷰 공간으로
-
+			localBox.Transform(viewBox, world * view);				// 큐브 박스를 뷰 공간으로
 			// 뷰 공간 절두체 vs 뷰 공간 박스
 			if(mCameraFrustum.Contains(viewBox) == DirectX::DISJOINT)
 				continue;				// 절두체 밖 -> 안 그림
 		}
 
-		// 절두체 안 -> 인스턴스 버퍼에 채움
-		
-		InstanceData data;
-		XMStoreFloat4x4(&data.World, XMMatrixTranspose(world));	// HLSL은 행우선이므로 전치행렬로 변환
-		mCurrFrameResource->InstanceBuffer->CopyData(visibleIdx, data);	// i번 슬롯에 상수 버퍼에 복사
+		mCurrFrameResource->VisibleIndexBuffer->CopyData(NumObjects + visibleIdx, (UINT)i);
 		visibleIdx++;
 	}
 
+	mShadowCount = shadowIdx;
 	mVisibleCount = visibleIdx;			// 보이는 개수 저장
 }
 
@@ -435,6 +460,40 @@ void Init::Draw()
 	ThrowIfFailed(cmdListAlloc->Reset());							// FrameResource에 있는 얼로케이터를 Reset
 	ThrowIfFailed(g_commandList->Reset(cmdListAlloc.Get(), mOpaquePSO.Get()));
 
+	// ===== 섀도 패스 =====
+	g_commandList->SetGraphicsRootSignature(mRootSignature.Get());
+	g_commandList->SetGraphicsRootShaderResourceView(1, mCurrFrameResource->InstanceBuffer->Resource()->GetGPUVirtualAddress());
+	g_commandList->SetGraphicsRootConstantBufferView(2, mCurrFrameResource->PassCB->Resource()->GetGPUVirtualAddress());
+
+	g_commandList->SetGraphicsRootShaderResourceView(6, mCurrFrameResource->VisibleIndexBuffer->Resource()->GetGPUVirtualAddress());
+	g_commandList->SetGraphicsRoot32BitConstant(7,0,0);								// 섀도 목록: offset 0
+
+	g_commandList->RSSetViewports(1, &mShadowViewport);
+	g_commandList->RSSetScissorRects(1, &mShadowScissor);
+
+	// GENERIC_READ -> DEPTH_WRITE
+	auto shadowToWrite = CD3DX12_RESOURCE_BARRIER::Transition(mShadowMap.Get(),
+		D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+		g_commandList->ResourceBarrier(1, &shadowToWrite);
+
+	auto shadowDsv = ShadowDsv();
+	g_commandList->ClearDepthStencilView(shadowDsv, 
+		D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
+	g_commandList->OMSetRenderTargets(0, nullptr, false, &shadowDsv);					// RT 없이 깊이만
+
+	g_commandList->SetPipelineState(mShadowPSO.Get());
+	auto svbv = mBoxGeo->VertexBufferView();
+	auto sibv = mBoxGeo->IndexBufferView();
+	g_commandList->IASetVertexBuffers(0, 1, &svbv);
+	g_commandList->IASetIndexBuffer(&sibv);
+	g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	g_commandList->DrawIndexedInstanced(36, mShadowCount, 0, 0, 0);
+
+	auto shadowToRead = CD3DX12_RESOURCE_BARRIER::Transition(mShadowMap.Get(),
+		D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_GENERIC_READ);
+	g_commandList->ResourceBarrier(1, &shadowToRead);
+	// ===== 섀도 패스 끝 =====
+
 	g_commandList->RSSetViewports(1, &mScreenViewport);
 	g_commandList->RSSetScissorRects(1, &mScissorRect);
 
@@ -478,6 +537,14 @@ void Init::Draw()
 	CD3DX12_GPU_DESCRIPTOR_HANDLE normalHandle(mSrvHeap->GetGPUDescriptorHandleForHeapStart());
 	normalHandle.Offset(2, g_cbvSrvUavDescriptorSize);						// 슬롯 2 = 노멀맵
 	g_commandList->SetGraphicsRootDescriptorTable(4, normalHandle);			// 루트 파라미터 4 = t3
+
+	// 섀도맵
+	CD3DX12_GPU_DESCRIPTOR_HANDLE shadowHandle(mSrvHeap->GetGPUDescriptorHandleForHeapStart());
+	shadowHandle.Offset(3, g_cbvSrvUavDescriptorSize);						// 슬롯 3 = 섀도맵
+	g_commandList->SetGraphicsRootDescriptorTable(5, shadowHandle);			// 루트 파라미터 5 = t4
+
+	g_commandList->SetGraphicsRootShaderResourceView(6, mCurrFrameResource->VisibleIndexBuffer->Resource()->GetGPUVirtualAddress());
+	g_commandList->SetGraphicsRoot32BitConstant(7, NumObjects, 0);			// 카메라 목록: offset NumObjects
 
 	// 정점/인덱스
 	auto vbv = mBoxGeo->VertexBufferView();
@@ -634,7 +701,7 @@ void Init::CreateRtvAndDsvDescriptorHeaps()
 	));
 
 	D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc;
-	dsvHeapDesc.NumDescriptors = 1;
+	dsvHeapDesc.NumDescriptors = 2;								// 0: 메인 깊이, 1: 섀도맵
 	dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
 	dsvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
 	dsvHeapDesc.NodeMask = 0;
@@ -738,14 +805,20 @@ void Init::BuildRootSignature()
 
 	CD3DX12_DESCRIPTOR_RANGE normalTable;
 	normalTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 3);	// t3(노멀맵)
+
+	CD3DX12_DESCRIPTOR_RANGE shadowTable;
+	shadowTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 4);	// t4(섀도맵)
 	
 	// cbv의 힙을 사용하지 않고 루트 디스크립터 방식으로 GPU 주소로 바로 때려박기 때문에 heap(공간), table(참조)를 안만들어도 됨.
-	CD3DX12_ROOT_PARAMETER slotRootParameter[5];
+	CD3DX12_ROOT_PARAMETER slotRootParameter[8];
 	slotRootParameter[0].InitAsDescriptorTable(1, &texTable, D3D12_SHADER_VISIBILITY_PIXEL);		// t0 텍스처	
 	slotRootParameter[1].InitAsShaderResourceView(1);												// t1 - 물체별 (1)은 레지스터 t1을 뜻함.
 	slotRootParameter[2].InitAsConstantBufferView(1);												// b1 - 패스별
 	slotRootParameter[3].InitAsDescriptorTable(1, &cubeTable, D3D12_SHADER_VISIBILITY_PIXEL);		// t2 큐브맵
 	slotRootParameter[4].InitAsDescriptorTable(1, &normalTable, D3D12_SHADER_VISIBILITY_PIXEL);		// t3 노멀맵
+	slotRootParameter[5].InitAsDescriptorTable(1, &shadowTable, D3D12_SHADER_VISIBILITY_PIXEL);		// t4 섀도맵
+	slotRootParameter[6].InitAsShaderResourceView(5);												// t5 가시 인덱스 목록
+	slotRootParameter[7].InitAsConstants(1,2);														// b2 인덱스 오프셋(uint 1개)
 
 	// 정적 샘플러 - 지난번 얘기한 그 방식, 별도 힙 불필요
 	CD3DX12_STATIC_SAMPLER_DESC linearWrap(
@@ -754,7 +827,20 @@ void Init::BuildRootSignature()
 		D3D12_TEXTURE_ADDRESS_MODE_WRAP,
 		D3D12_TEXTURE_ADDRESS_MODE_WRAP);
 
-	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(5, slotRootParameter, 1, &linearWrap, 
+	CD3DX12_STATIC_SAMPLER_DESC shadowSampler(
+		1,																							// s1
+		D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT,											// 비교 + 선형 -> 하드웨어 2x2 PCF
+		D3D12_TEXTURE_ADDRESS_MODE_BORDER,
+		D3D12_TEXTURE_ADDRESS_MODE_BORDER,
+		D3D12_TEXTURE_ADDRESS_MODE_BORDER,
+		0.0f, 16,
+		D3D12_COMPARISON_FUNC_LESS_EQUAL,															// 내 깊이 <= 섀도맵 깊이 -> 빛 받음
+		D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE);													// 섀도맵 밖은 빛 받는 걸로
+
+	std::array<CD3DX12_STATIC_SAMPLER_DESC, 2> samplers = { linearWrap, shadowSampler };
+
+	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(8, slotRootParameter, 
+		(UINT)samplers.size(), samplers.data(),
 		D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
 	ComPtr<ID3DBlob> serializedRootSig = nullptr;
@@ -907,12 +993,14 @@ void Init::BuildShadersAndInputLayout()
 	mShaders["skyVS"] = d3dUtil::CompileShader(L"Shaders\\sky.hlsl", nullptr, "VS", "vs_5_0");
 	mShaders["skyPS"] = d3dUtil::CompileShader(L"Shaders\\sky.hlsl", nullptr, "PS", "ps_5_0");
 
+	mShaders["shadowVS"] = d3dUtil::CompileShader(L"Shaders\\shadow.hlsl", nullptr, "VS", "vs_5_0");
+
 	mInputLayout =
 	{
 		{ "POSITION",	0,	DXGI_FORMAT_R32G32B32_FLOAT,	0,	0,							D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
 		{ "NORMAL",		0,	DXGI_FORMAT_R32G32B32_FLOAT,	0,	offsetof(Vertex, Normal),	D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
 		{ "TEXCOORD",	0,	DXGI_FORMAT_R32G32_FLOAT,		0,	offsetof(Vertex, TexC),		D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-		{ "TANGENT",	0,	DXGI_FORMAT_R32G32B32_FLOAT, 0,	offsetof(Vertex, TangentU),	D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TANGENT",	0,	DXGI_FORMAT_R32G32B32_FLOAT,	0,	offsetof(Vertex, TangentU),	D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
 	};
 }
 
@@ -964,6 +1052,7 @@ void Init::BuildPSO()
 
 	ThrowIfFailed(g_device->CreateGraphicsPipelineState(&transparentPsoDesc, IID_PPV_ARGS(&mTransparentPSO)));
 
+	// 하늘맵 PSO
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC skyPsoDesc = opaquePsoDesc;
 	// 컬링을 안쪽 면으로 (큐브 안에서 움직이기 때문)
 	skyPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;			// 또는 FRONT
@@ -981,6 +1070,25 @@ void Init::BuildPSO()
 	};
 
 	ThrowIfFailed(g_device->CreateGraphicsPipelineState(&skyPsoDesc, IID_PPV_ARGS(&mSkyPSO)));
+
+	// 섀도맵 PSO
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC shadowPsoDesc = opaquePsoDesc;
+	shadowPsoDesc.RasterizerState.DepthBias = 100000;						// 섀도 애크로 방지
+	shadowPsoDesc.RasterizerState.DepthBiasClamp = 0.0f;
+	shadowPsoDesc.RasterizerState.SlopeScaledDepthBias = 1.0f;
+	shadowPsoDesc.VS=
+	{
+		reinterpret_cast<BYTE*>(mShaders["shadowVS"]->GetBufferPointer()),
+		mShaders["shadowVS"]->GetBufferSize()
+	};
+	shadowPsoDesc.PS = { nullptr, 0 };										// 깊이만
+	shadowPsoDesc.NumRenderTargets = 0;
+	shadowPsoDesc.RTVFormats[0] = DXGI_FORMAT_UNKNOWN;
+	shadowPsoDesc.SampleDesc.Count = 1;										// 섀도맵은 MSAA 아님
+	shadowPsoDesc.SampleDesc.Quality = 0;
+	shadowPsoDesc.DSVFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
+
+	ThrowIfFailed(g_device->CreateGraphicsPipelineState(&shadowPsoDesc, IID_PPV_ARGS(&mShadowPSO)));
 }
 
 void Init::BuildOffscreenResources()
@@ -1219,6 +1327,46 @@ void Init::BlurExecute(int blurCount)
 	// 최종 결과는 블러맵1에 (마지막이 세로 블러 -> 블러맵1, 근데 위에서 b1ToSrv 했으니 SRV 상태)
 }
 
+void Init::BuildShadowMapResource()
+{
+	mShadowViewport = { 0.0f, 0.0f, (float)shadowMapSize, (float)shadowMapSize , 0.0f, 1.0f };
+	mShadowScissor = { 0, 0, (int)shadowMapSize, (int)shadowMapSize };
+
+	D3D12_RESOURCE_DESC texDesc = {};
+	texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+	texDesc.Width = shadowMapSize;
+	texDesc.Height = shadowMapSize;
+	texDesc.DepthOrArraySize = 1;
+	texDesc.MipLevels = 1;
+	texDesc.Format = DXGI_FORMAT_R24G8_TYPELESS;							// DSV/SRV 겸용이라 TYPELESS
+	texDesc.SampleDesc.Count = 1;
+	texDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+	texDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+
+	D3D12_CLEAR_VALUE optClear = {};
+	optClear.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+	optClear.DepthStencil.Depth = 1.0f;
+	optClear.DepthStencil.Stencil = 0;
+
+	auto heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+	ThrowIfFailed(g_device->CreateCommittedResource(
+		&heapProps, D3D12_HEAP_FLAG_NONE, &texDesc,
+		D3D12_RESOURCE_STATE_GENERIC_READ,									// 평소엔 읽기 상태로 둠
+		&optClear, IID_PPV_ARGS(&mShadowMap)));
+
+	// DSV (DSV 힙 슬롯 1)
+	D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
+	dsvDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+	dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+	dsvDesc.Flags = D3D12_DSV_FLAG_NONE;
+	g_device->CreateDepthStencilView(mShadowMap.Get(), &dsvDesc, ShadowDsv());
+}
+
+CD3DX12_CPU_DESCRIPTOR_HANDLE Init::ShadowDsv() const
+{
+	return CD3DX12_CPU_DESCRIPTOR_HANDLE(g_dsvHeap->GetCPUDescriptorHandleForHeapStart(), 1, g_dsvDescriptorSize);
+}
+
 /*
 * 텍스처 로드 함수는 반드시 커맨드 리스트가 열려있을 떄 호출해야 됨.
 */
@@ -1256,7 +1404,7 @@ void Init::LoadTextures()
 void Init::BuildSrvHeap()
 {
 	D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-	srvHeapDesc.NumDescriptors = 3;										// 2개 (박스 + 배경)
+	srvHeapDesc.NumDescriptors = 4;										// 2개 (박스 + 배경)
 	srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 	srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;		// 필수
 	ThrowIfFailed(g_device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&mSrvHeap)));
@@ -1292,6 +1440,15 @@ void Init::BuildSrvHeap()
 	nDesc.Format = mNormalTex->Resource->GetDesc().Format;
 	nDesc.Texture2D.MipLevels = mNormalTex->Resource->GetDesc().MipLevels;
 	g_device->CreateShaderResourceView(mNormalTex->Resource.Get(), &nDesc, handle);
+
+	// 슬롯 3: 새도맵
+	handle.Offset(1, g_cbvSrvUavDescriptorSize);
+	D3D12_SHADER_RESOURCE_VIEW_DESC shadowSrv = {};
+	shadowSrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	shadowSrv.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+	shadowSrv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+	shadowSrv.Texture2D.MipLevels = 1;
+	g_device->CreateShaderResourceView(mShadowMap.Get(), &shadowSrv, handle);
 }
 
 // sigma가 클수록 더 흐려짐

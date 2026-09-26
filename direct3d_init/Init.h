@@ -97,6 +97,9 @@ protected:
 
 	void BlurExecute(int blurCount);				// 블러 실행 함수 (블러의 하이라이트; 핑퐁, UAV배리어)
 
+	void BuildShadowMapResource();							// 새도우 리소스 생성
+	CD3DX12_CPU_DESCRIPTOR_HANDLE ShadowDsv() const;		// 디스크립터 생성
+
 	void LoadTextures();
 	void BuildSrvHeap();
 
@@ -222,4 +225,14 @@ protected:
 
 	// 노멀맵
 	std::unique_ptr<Texture> mNormalTex = nullptr;
+
+	// 섀도
+	ComPtr<ID3D12PipelineState> mShadowPSO = nullptr;
+
+	static const UINT shadowMapSize = 2048;
+	ComPtr<ID3D12Resource> mShadowMap = nullptr;
+	D3D12_VIEWPORT mShadowViewport;
+	D3D12_RECT mShadowScissor;
+
+	int mShadowCount = 0;									// 섀도 패스에서 그릴 개수
 };
