@@ -289,6 +289,10 @@ bool Init::InitD3D()
 	BuildBlurRootSignature();
 	BuildBlurPSO();
 
+	BuildCullResources();
+	BuildCullRootSignature();
+	BuildCullPSO();
+
 	ThrowIfFailed(g_commandList->Close());	// 명령 목록 닫기
 	ID3D12CommandList* cmdsLists[] = { g_commandList.Get() };
 	g_commandQueue->ExecuteCommandLists(_countof(cmdsLists), cmdsLists);	// 명령 목록 실행
@@ -313,6 +317,9 @@ void Init::Update(const GameTimer& gt)
 		CloseHandle(eventHandle);
 	}
 
+	// 3프레임 전 GPU 컬링 결과 (표시용)
+	mGPUVisibleCount = *mCullReadbackPtr[mCurrFrameResourceIndex];
+
 	// 카메로 이동 처리 (WASD)
 	OnKeyboardInput(gt);			
 
@@ -323,13 +330,33 @@ void Init::Update(const GameTimer& gt)
 	XMMATRIX proj = mCamera.GetProj();
 	XMMATRIX viewProj = view * proj;
 
+	// -- GPU 컬링용 월드 공간 프러스텀 평면 --
+	XMMATRIX vpT = XMMatrixTranspose(viewProj);
+	XMVECTOR c0 = vpT.r[0], c1 = vpT.r[1], c2 = vpT.r[2], c3 = vpT.r[3];
+	XMVECTOR planes[6] = 
+	{
+		c3 + c0,			// left
+		c3 - c0,			// right
+		c3 + c1,			// bottom
+		c3 - c1,			// top
+		c2,					// near (D3D: 0 <= z)
+		c3 - c2				// far
+	};
+	for(int p = 0; p < 6; ++p)
+		XMStoreFloat4(&mCullConstants.Planes[p], XMPlaneNormalize(planes[p]));			// 거리 비교하려면 정규화 필수
+	mCullConstants.InstanceCount = NumObjects;
+
+	// F4 OFF: 모든 평면을 (0,0,0,1)로 전부 통과
+	if(!mFrustumCullingEnabled)
+		for(int p = 0; p < 6; ++p)
+			mCullConstants.Planes[p] = XMFLOAT4(0.0f, 0.0f, 0.0f, 1.0f);
 
 	XMVECTOR pos = mCamera.GetPosition();			// 조명 계산용 카메라 위치
 
 	// 투영 행렬로부터 절두체 생성 (뷰 공간 기준)
 	// 이 절두체는 뷰 공간 기준이다
 	// 카메라가 원점에서 +z를 보는 표준 절두체
-	BoundingFrustum::CreateFromMatrix(mCameraFrustum, proj);
+	//BoundingFrustum::CreateFromMatrix(mCameraFrustum, proj);
 
 	PassConstants passCB;
 	XMStoreFloat4x4(&passCB.ViewProj, XMMatrixTranspose(viewProj));
@@ -389,28 +416,29 @@ void Init::Update(const GameTimer& gt)
 		// -- 섀도 뷰: 지금은 전부 (다음 단계에서 라이트 박스로 컬링)
 		mCurrFrameResource->VisibleIndexBuffer->CopyData(shadowIdx++, (UINT)i);
 
-		// -- 카메라 뷰: 프리스텀 컬링 --
-		if (mFrustumCullingEnabled)
-		{
-			// 큐브의 로컬 AABBb (큐브가 +-1 크기니까 중심 원점, 반경1)
-			BoundingBox localBox;
-			localBox.Center = { 0.0f, 0.0f, 0.0f };
-			localBox.Extents = { 1.0f, 1.0f, 1.0f };
+		//// -- 카메라 뷰: 프리스텀 컬링 --
+		//if (mFrustumCullingEnabled)
+		//{
+		//	// 큐브의 로컬 AABBb (큐브가 +-1 크기니까 중심 원점, 반경1)
+		//	BoundingBox localBox;
+		//	localBox.Center = { 0.0f, 0.0f, 0.0f };
+		//	localBox.Extents = { 1.0f, 1.0f, 1.0f };
+		//
+		//
+		//	BoundingBox viewBox;
+		//	localBox.Transform(viewBox, world * view);				// 큐브 박스를 뷰 공간으로
+		//	// 뷰 공간 절두체 vs 뷰 공간 박스
+		//	if(mCameraFrustum.Contains(viewBox) == DirectX::DISJOINT)
+		//		continue;				// 절두체 밖 -> 안 그림
+		//}
 
 
-			BoundingBox viewBox;
-			localBox.Transform(viewBox, world * view);				// 큐브 박스를 뷰 공간으로
-			// 뷰 공간 절두체 vs 뷰 공간 박스
-			if(mCameraFrustum.Contains(viewBox) == DirectX::DISJOINT)
-				continue;				// 절두체 밖 -> 안 그림
-		}
-
-		mCurrFrameResource->VisibleIndexBuffer->CopyData(NumObjects + visibleIdx, (UINT)i);
-		visibleIdx++;
+		//mCurrFrameResource->VisibleIndexBuffer->CopyData(NumObjects + visibleIdx, (UINT)i);
+		//visibleIdx++;
 	}
 
 	mShadowCount = shadowIdx;
-	mVisibleCount = visibleIdx;			// 보이는 개수 저장
+	mVisibleCount = mGPUVisibleCount;			// 보이는 개수 저장
 }
 
 /*
@@ -460,13 +488,62 @@ void Init::Draw()
 	ThrowIfFailed(cmdListAlloc->Reset());							// FrameResource에 있는 얼로케이터를 Reset
 	ThrowIfFailed(g_commandList->Reset(cmdListAlloc.Get(), mOpaquePSO.Get()));
 
+	// ===== GPU 컬링 =====
+	// (1) 인자 버퍼 리셋: COMMON -> COPY_DEST -> 복사 -> UAV
+	{
+		auto a = CD3DX12_RESOURCE_BARRIER::Transition(mDrawArgsBuffer.Get(),
+			D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+		g_commandList->ResourceBarrier(1, &a);
+	}
+	g_commandList->CopyBufferRegion(mDrawArgsBuffer.Get(), 0, mDrawArgsReset.Get(), 0, sizeof(D3D12_DRAW_INDEXED_ARGUMENTS));
+
+	// (2) 둘 다 UAV로
+	{
+		CD3DX12_RESOURCE_BARRIER b[2] =
+		{
+			CD3DX12_RESOURCE_BARRIER::Transition(mDrawArgsBuffer.Get(),
+				D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+			CD3DX12_RESOURCE_BARRIER::Transition(mCulledIndexBuffer.Get(),
+				D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+		};
+		g_commandList->ResourceBarrier(2, b);
+	}
+
+	// (3) 컬링 디스패치
+	g_commandList->SetComputeRootSignature(mCullRootSignature.Get());
+	g_commandList->SetPipelineState(mCullPSO.Get());
+	g_commandList->SetComputeRoot32BitConstants(0, sizeof(CullConstants) / 4, &mCullConstants, 0);
+	g_commandList->SetComputeRootShaderResourceView(1, mCurrFrameResource->InstanceBuffer->Resource()->GetGPUVirtualAddress());
+	g_commandList->SetComputeRootUnorderedAccessView(2, mCulledIndexBuffer->GetGPUVirtualAddress());
+	g_commandList->SetComputeRootUnorderedAccessView(3, mDrawArgsBuffer->GetGPUVirtualAddress());
+	g_commandList->Dispatch((NumObjects + 63) / 64, 1, 1);
+
+	// UAV -> 읽기 상태 (인다이렉트 인자 + 복사 소스는 둘 다 읽기라 OR 가능)
+	{
+		CD3DX12_RESOURCE_BARRIER b[2] = 
+		{
+			CD3DX12_RESOURCE_BARRIER::Transition(mDrawArgsBuffer.Get(),
+				D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+				D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT | D3D12_RESOURCE_STATE_COPY_SOURCE),
+			CD3DX12_RESOURCE_BARRIER::Transition(mCulledIndexBuffer.Get(),
+				D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+				D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+		};
+		g_commandList->ResourceBarrier(2, b);
+	}
+
+	// (5) 디버그: InstanceCount(offset 4)만 readback으로 복사
+	g_commandList->CopyBufferRegion(mCullReadback[mCurrFrameResourceIndex].Get(), 0, mDrawArgsBuffer.Get(), 4, sizeof(UINT));
+	// ===== GPU 컬링 끝 =====
+
 	// ===== 섀도 패스 =====
 	g_commandList->SetGraphicsRootSignature(mRootSignature.Get());
 	g_commandList->SetGraphicsRootShaderResourceView(1, mCurrFrameResource->InstanceBuffer->Resource()->GetGPUVirtualAddress());
 	g_commandList->SetGraphicsRootConstantBufferView(2, mCurrFrameResource->PassCB->Resource()->GetGPUVirtualAddress());
 
+	// 섀도 = CPU 목록(전체)
 	g_commandList->SetGraphicsRootShaderResourceView(6, mCurrFrameResource->VisibleIndexBuffer->Resource()->GetGPUVirtualAddress());
-	g_commandList->SetGraphicsRoot32BitConstant(7,0,0);								// 섀도 목록: offset 0
+	g_commandList->SetGraphicsRoot32BitConstant(7,0,0);								// GPU 목록은 0부터
 
 	g_commandList->RSSetViewports(1, &mShadowViewport);
 	g_commandList->RSSetScissorRects(1, &mShadowScissor);
@@ -482,10 +559,10 @@ void Init::Draw()
 	g_commandList->OMSetRenderTargets(0, nullptr, false, &shadowDsv);					// RT 없이 깊이만
 
 	g_commandList->SetPipelineState(mShadowPSO.Get());
-	auto svbv = mBoxGeo->VertexBufferView();
-	auto sibv = mBoxGeo->IndexBufferView();
-	g_commandList->IASetVertexBuffers(0, 1, &svbv);
-	g_commandList->IASetIndexBuffer(&sibv);
+	auto vbv = mBoxGeo->VertexBufferView();
+	auto ibv = mBoxGeo->IndexBufferView();
+	g_commandList->IASetVertexBuffers(0, 1, &vbv);
+	g_commandList->IASetIndexBuffer(&ibv);
 	g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	g_commandList->DrawIndexedInstanced(36, mShadowCount, 0, 0, 0);
 
@@ -543,19 +620,20 @@ void Init::Draw()
 	shadowHandle.Offset(3, g_cbvSrvUavDescriptorSize);						// 슬롯 3 = 섀도맵
 	g_commandList->SetGraphicsRootDescriptorTable(5, shadowHandle);			// 루트 파라미터 5 = t4
 
-	g_commandList->SetGraphicsRootShaderResourceView(6, mCurrFrameResource->VisibleIndexBuffer->Resource()->GetGPUVirtualAddress());
-	g_commandList->SetGraphicsRoot32BitConstant(7, NumObjects, 0);			// 카메라 목록: offset NumObjects
+	// 메인 = GPU 컬링 결과
+	g_commandList->SetGraphicsRootShaderResourceView(6, mCulledIndexBuffer->GetGPUVirtualAddress());
+	g_commandList->SetGraphicsRoot32BitConstant(7, 0, 0);			// 카메라 목록: offset NumObjects
 
 	// 정점/인덱스
-	auto vbv = mBoxGeo->VertexBufferView();
-	auto ibv = mBoxGeo->IndexBufferView();
 	g_commandList->IASetVertexBuffers(0, 1, &vbv);
 	g_commandList->IASetIndexBuffer(&ibv);
 	g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
 	// 드로우콜 1번으로 27개
 	g_commandList->SetPipelineState(mOpaquePSO.Get());
-	g_commandList->DrawIndexedInstanced(36, mVisibleCount, 0, 0, 0);
+	//g_commandList->DrawIndexedInstanced(36, mVisibleCount, 0, 0, 0);			// 기존
+	// 인스턴스 개수를 CPU가 전혀 모르는 상태에서 GPU가 쓴 InstanceCount로 그대로 그리게 된다.
+	g_commandList->ExecuteIndirect(mDrawCmdSig.Get(), 1, mDrawArgsBuffer.Get(), 0, nullptr, 0);
 
 	// 스카이박스
 	g_commandList->SetPipelineState(mSkyPSO.Get());
@@ -743,7 +821,8 @@ void Init::CalculateFrameState()
 		std::wstring text = L"Direct3D 12 Init     fps: " + std::to_wstring((int)fps)
 							+ L"      mfps: " + std::to_wstring(mfps)
 							+ L"      visible: " + std::to_wstring(mVisibleCount) + L"/" + std::to_wstring(NumObjects)
-							+ (mFrustumCullingEnabled ? L"   [Cull ON]" : L"    [Cull OFF]");
+							+ (mFrustumCullingEnabled ? L"   [Cull ON]" : L"    [Cull OFF]")
+							+ L"      gpu: " + std::to_wstring(mGPUVisibleCount);
 		SetWindowText(mhMainWnd, text.c_str());
 
 		frameCnt = 0;
@@ -994,6 +1073,8 @@ void Init::BuildShadersAndInputLayout()
 	mShaders["skyPS"] = d3dUtil::CompileShader(L"Shaders\\sky.hlsl", nullptr, "PS", "ps_5_0");
 
 	mShaders["shadowVS"] = d3dUtil::CompileShader(L"Shaders\\shadow.hlsl", nullptr, "VS", "vs_5_0");
+
+	mShaders["cullCS"] = d3dUtil::CompileShader(L"Shaders\\cull.hlsl", nullptr, "CullCS", "cs_5_0");
 
 	mInputLayout =
 	{
@@ -1365,6 +1446,85 @@ void Init::BuildShadowMapResource()
 CD3DX12_CPU_DESCRIPTOR_HANDLE Init::ShadowDsv() const
 {
 	return CD3DX12_CPU_DESCRIPTOR_HANDLE(g_dsvHeap->GetCPUDescriptorHandleForHeapStart(), 1, g_dsvDescriptorSize);
+}
+
+void Init::BuildCullResources()
+{
+	auto defaultHeap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+	auto uploadHeap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+	auto readbackHeap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_READBACK);
+
+	// 버퍼는 COMMON으로 생성 (ExecuteCommandLists 끝나면 COMMON으로 decay됨)
+	auto idxDesc = CD3DX12_RESOURCE_DESC::Buffer(NumObjects * sizeof(UINT), D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+	ThrowIfFailed(g_device->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE,
+		&idxDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&mCulledIndexBuffer)));
+
+	auto argsDesc = CD3DX12_RESOURCE_DESC::Buffer(sizeof(D3D12_DRAW_INDEXED_ARGUMENTS), D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+	ThrowIfFailed(g_device->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE,
+		&argsDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&mDrawArgsBuffer)));
+
+	// 리셋 원본: IndexCount = 36, InstanceCount = 0 (CS가 여기서부터 증가)
+	auto resetDesc = CD3DX12_RESOURCE_DESC::Buffer(sizeof(D3D12_DRAW_INDEXED_ARGUMENTS));
+	ThrowIfFailed(g_device->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE,
+		&resetDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&mDrawArgsReset)));
+
+	D3D12_DRAW_INDEXED_ARGUMENTS resetArgs = { 36, 0, 0, 0, 0 };
+	void* p = nullptr;
+	ThrowIfFailed(mDrawArgsReset->Map(0, nullptr, &p));
+	memcpy(p, &resetArgs, sizeof(resetArgs));
+	mDrawArgsReset->Unmap(0, nullptr);
+
+	// 디버그용 readback (프레임 리소스 개수만큼 -> CPU가 읽는 중에 GPU가 덮어쓰지 않게)
+	auto rbDesc = CD3DX12_RESOURCE_DESC::Buffer(sizeof(UINT));
+	for (int i = 0; i < NumFrameResources; ++i)
+	{
+		ThrowIfFailed(g_device->CreateCommittedResource(&readbackHeap, D3D12_HEAP_FLAG_NONE,
+			&rbDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&mCullReadback[i])));
+		ThrowIfFailed(mCullReadback[i]->Map(0, nullptr, reinterpret_cast<void**>(&mCullReadbackPtr[i])));
+	}
+}
+
+void Init::BuildCullRootSignature()
+{
+	CD3DX12_ROOT_PARAMETER params[4];
+	params[0].InitAsConstants(sizeof(CullConstants) / 4, 0);					// b0: 평면 24 + 개수 1 = 25 DWORD
+	params[1].InitAsShaderResourceView(0);										// t0: 인스턴스
+	params[2].InitAsUnorderedAccessView(0);										// u0: 컬링 결과 인덱스
+	params[3].InitAsUnorderedAccessView(1);										// u1: 드로우 인자
+
+	CD3DX12_ROOT_SIGNATURE_DESC desc(4, params, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE);
+
+	ComPtr<ID3DBlob> serialized, error;
+	HRESULT hr = D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1_0, serialized.GetAddressOf(), error.GetAddressOf());
+	if(error)
+		OutputDebugStringA((char*)error->GetBufferPointer());
+
+	ThrowIfFailed(hr);
+	ThrowIfFailed(g_device->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(), IID_PPV_ARGS(&mCullRootSignature)));
+}
+
+void Init::BuildCullPSO()
+{
+	D3D12_COMPUTE_PIPELINE_STATE_DESC desc = {};
+	desc.pRootSignature = mCullRootSignature.Get();
+	desc.CS = 
+	{
+		mShaders["cullCS"]->GetBufferPointer(),
+		mShaders["cullCS"]->GetBufferSize()
+	};
+	ThrowIfFailed(g_device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&mCullPSO)));
+
+	// "인자 버퍼의 한 항목 = DrawIndexed 1회"라는 형식 정의
+	D3D12_INDIRECT_ARGUMENT_DESC argDesc = {};
+	argDesc.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
+
+	D3D12_COMMAND_SIGNATURE_DESC sigDesc = {};
+	sigDesc.ByteStride = sizeof(D3D12_DRAW_INDEXED_ARGUMENTS);			// 20
+	sigDesc.NumArgumentDescs = 1;
+	sigDesc.pArgumentDescs = &argDesc;
+
+	// 루트 인자를 바꾸지 않고 드로우 인자만 있으면 루트 시그니처는 nullptr
+	ThrowIfFailed(g_device->CreateCommandSignature(&sigDesc, nullptr, IID_PPV_ARGS(&mDrawCmdSig)));
 }
 
 /*

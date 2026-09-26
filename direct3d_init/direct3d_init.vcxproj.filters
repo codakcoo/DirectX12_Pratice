@@ -91,5 +91,8 @@
     <None Include="Shaders\shadow.hlsl">
       <Filter>Shaders</Filter>
     </None>
+    <None Include="Shaders\cull.hlsl">
+      <Filter>Shaders</Filter>
+    </None>
   </ItemGroup>
 </Project>

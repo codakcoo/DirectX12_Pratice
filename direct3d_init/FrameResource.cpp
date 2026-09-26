@@ -10,5 +10,5 @@ FrameResource::FrameResource(ID3D12Device* device, UINT passCount, UINT instance
 
 	PassCB = std::make_unique<UploadBuffer<PassConstants>> (device, passCount, true);
 	InstanceBuffer = std::make_unique<UploadBuffer<InstanceData>>(device, instanceCount, false);
-	VisibleIndexBuffer = std::make_unique<UploadBuffer<UINT>>(device, 2*instanceCount, false);
+	VisibleIndexBuffer = std::make_unique<UploadBuffer<UINT>>(device, instanceCount, false);
 }

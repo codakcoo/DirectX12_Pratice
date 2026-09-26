@@ -28,6 +28,11 @@ using Microsoft::WRL::ComPtr;
 //using DirectX::XMFLOAT3;
 //using DirectX::XMFLOAT4;
 
+struct CullConstants
+{
+	XMFLOAT4 Planes[6];
+	UINT InstanceCount;
+};
 
 
 class Init
@@ -99,6 +104,11 @@ protected:
 
 	void BuildShadowMapResource();							// 새도우 리소스 생성
 	CD3DX12_CPU_DESCRIPTOR_HANDLE ShadowDsv() const;		// 디스크립터 생성
+
+	// GPU 컬링
+	void BuildCullResources();
+	void BuildCullRootSignature();
+	void BuildCullPSO();
 
 	void LoadTextures();
 	void BuildSrvHeap();
@@ -235,4 +245,17 @@ protected:
 	D3D12_RECT mShadowScissor;
 
 	int mShadowCount = 0;									// 섀도 패스에서 그릴 개수
+
+	// GPU 컬링
+	ComPtr<ID3D12Resource> mCulledIndexBuffer = nullptr;				// u0 -> t5
+	ComPtr<ID3D12Resource> mDrawArgsBuffer = nullptr;					// t1 -> 인다이렉트 인자
+	ComPtr<ID3D12Resource> mDrawArgsReset = nullptr;					// 매 프레임 리셋용 원본 {36, 0, 0, 0}
+	ComPtr<ID3D12Resource> mCullReadback[NumFrameResources];
+	UINT* mCullReadbackPtr[NumFrameResources] = {};
+	ComPtr<ID3D12RootSignature> mCullRootSignature = nullptr;
+	ComPtr<ID3D12PipelineState> mCullPSO = nullptr;
+	CullConstants mCullConstants = {};
+	UINT mGPUVisibleCount = 0;
+
+	ComPtr<ID3D12CommandSignature> mDrawCmdSig = nullptr;
 };
