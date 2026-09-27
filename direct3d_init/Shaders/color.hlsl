@@ -77,7 +77,11 @@ float4 PS(VertexOut pin) : SV_TARGET
     float shadowFactor = CalcShadowFactor(pin.ShadowPosH);
     
     float3 diffuse = shadowFactor * gLights[0].Strength * ndotl * diffuseAlbedo.rgb;
-    float3 ambient = gAmbientLight.rgb * diffuseAlbedo.rgb;                                         // ambient, 환경 반사는 그대로 (그림자 안에서도 보여야함)
+    // SV_POSITION은 PS에서 픽셀 좌표 -> 풀해상도 AO 맵을 그대로 Load
+    // ao는 ambient에만 곱함
+    // ao는 직사광이 아닌 간접광이 틈으로 덜 들어오는 것을 흉내내는 역할기 때문이다
+    float ao = gSsaoMap.Load(int3(pin.PosH.xy, 0)).r;                                                    
+    float3 ambient = ao * gAmbientLight.rgb * diffuseAlbedo.rgb;                                         // ambient, 환경 반사는 그대로 (그림자 안에서도 보여야함)
     
     // --스페큘러(Blinn-Phong)--
     float3 toEyeW = normalize(gEyePosW - pin.PosW);     // 표면 -> 카메라
@@ -100,5 +104,6 @@ float4 PS(VertexOut pin) : SV_TARGET
     //return float4(glossMask.xxx, 1.0f);                       // 마스크 시각화
     //return float4(specular, 1.0f);                            // 하이라트 시각화 
     //return float4(shadowFactor.xxx, 1.0f);                    // 섀도우 시각화
+    if (gDebugSsao) return float4(ao, ao, ao, 1.0f);
     return float4(litColor, diffuseAlbedo.a);
 }

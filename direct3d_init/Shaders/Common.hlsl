@@ -25,6 +25,7 @@ TextureCube                             gCubeMap : register(t2); // 환경맵
 Texture2D                               gNormalMap : register(t3); // 노멀맵
 Texture2D                               gShadowMap : register(t4); // 섀도맵
 StructuredBuffer<uint>                  gVisibleIndices : register(t5);
+Texture2D                               gSsaoMap : register(t6);
 
 SamplerState                            gsamLinear : register(s0);
 SamplerComparisonState                  gsamShadow : register(s1);
@@ -45,6 +46,7 @@ cbuffer cbPass : register(b1)
 cbuffer cbView : register(b2)
 {
     uint gIndexOffset;
+    uint gDebugSsao;                    // 1이면 AO만 출력
 };
 
 // 뷰별 목록 -> 전역 인스턴스 행렬

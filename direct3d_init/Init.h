@@ -127,6 +127,9 @@ protected:
 
 	void BuildSsaoRootSignature();
 	void BuildSsaoPSO();
+	void BuildAoMapResource();
+	D3D12_CPU_DESCRIPTOR_HANDLE AoRtv() const;
+	void BindSceneRootArgs();						// 메인 루트 시그니처 바인딩 묶음
 
 	void LoadTextures();
 	void BuildSrvHeap();
@@ -284,7 +287,11 @@ protected:
 	bool mShowNormals = false;
 	
 	ComPtr<ID3D12RootSignature> mSsaoRootSignature = nullptr;
-	ComPtr<ID3D12PipelineState> mSsaoDebugPSO = nullptr;
+	ComPtr<ID3D12PipelineState> mSsaoPSO = nullptr;
 	SsaoConstants mSsaoConstants;
 	bool mShowSsao = false;
+
+	// AO
+	ComPtr<ID3D12Resource> mAoMap = nullptr;
+	DXGI_FORMAT mAoMapFormat = DXGI_FORMAT_R16_UNORM;
 };

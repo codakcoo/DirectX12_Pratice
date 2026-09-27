@@ -292,6 +292,7 @@ bool Init::InitD3D()
 	BuildOffscreenResources();
 	BuildOffscreenViews();
 	BuildNormalMapResource();
+	BuildAoMapResource();
 	BuildBlurResources();
 	BuildBlurDescriptorHeap();
 	BuildBlurRootSignature();
@@ -590,33 +591,35 @@ void Init::Draw()
 	g_commandList->RSSetViewports(1, &mScreenViewport);
 	g_commandList->RSSetScissorRects(1, &mScissorRect);
 
-	// -- 공용 바인딩 (노멀 패스와 메인 패스가 같이 씀)
-	g_commandList->SetGraphicsRootSignature(mRootSignature.Get());
-	ID3D12DescriptorHeap* srvHeaps[] = { mSrvHeap.Get() };
-	g_commandList->SetDescriptorHeaps(1, srvHeaps);
+	BindSceneRootArgs();										// <- 기존 "공용 바인딩" 블록 전체를 이 한 줄로
 
-	auto heapStart = mSrvHeap->GetGPUDescriptorHandleForHeapStart();
-	g_commandList->SetGraphicsRootDescriptorTable(0, heapStart);
-	// t1 인스턴스 버퍼
-	g_commandList->SetGraphicsRootShaderResourceView(1, mCurrFrameResource->InstanceBuffer->Resource()->GetGPUVirtualAddress());
-	// b1 패스
-	D3D12_GPU_VIRTUAL_ADDRESS passCBAddress = mCurrFrameResource->PassCB->Resource()->GetGPUVirtualAddress();
-	g_commandList->SetGraphicsRootConstantBufferView(2, passCBAddress);				// 슬롯 1, 프레임당 한번만
-	// 큐브맵
-	CD3DX12_GPU_DESCRIPTOR_HANDLE cubeHandle(mSrvHeap->GetGPUDescriptorHandleForHeapStart());
-	cubeHandle.Offset(1, g_cbvSrvUavDescriptorSize);						// 슬롯 1 = 큐브맵
-	g_commandList->SetGraphicsRootDescriptorTable(3, cubeHandle);			// 루트 파라미터
-	// 노멀맵
-	CD3DX12_GPU_DESCRIPTOR_HANDLE normalHandle(mSrvHeap->GetGPUDescriptorHandleForHeapStart());
-	normalHandle.Offset(2, g_cbvSrvUavDescriptorSize);						// 슬롯 2 = 노멀맵
-	g_commandList->SetGraphicsRootDescriptorTable(4, normalHandle);			// 루트 파라미터 4 = t3
-	// 섀도맵
-	CD3DX12_GPU_DESCRIPTOR_HANDLE shadowHandle(mSrvHeap->GetGPUDescriptorHandleForHeapStart());
-	shadowHandle.Offset(3, g_cbvSrvUavDescriptorSize);						// 슬롯 3 = 섀도맵
-	g_commandList->SetGraphicsRootDescriptorTable(5, shadowHandle);			// 루트 파라미터 5 = t4
-	// 메인 = GPU 컬링 결과
-	g_commandList->SetGraphicsRootShaderResourceView(6, mCulledIndexBuffer->GetGPUVirtualAddress());
-	g_commandList->SetGraphicsRoot32BitConstant(7, 0, 0);			// 카메라 목록: offset NumObjects
+	//// -- 공용 바인딩 (노멀 패스와 메인 패스가 같이 씀)
+	//g_commandList->SetGraphicsRootSignature(mRootSignature.Get());
+	//ID3D12DescriptorHeap* srvHeaps[] = { mSrvHeap.Get() };
+	//g_commandList->SetDescriptorHeaps(1, srvHeaps);
+
+	//auto heapStart = mSrvHeap->GetGPUDescriptorHandleForHeapStart();
+	//g_commandList->SetGraphicsRootDescriptorTable(0, heapStart);
+	//// t1 인스턴스 버퍼
+	//g_commandList->SetGraphicsRootShaderResourceView(1, mCurrFrameResource->InstanceBuffer->Resource()->GetGPUVirtualAddress());
+	//// b1 패스
+	//D3D12_GPU_VIRTUAL_ADDRESS passCBAddress = mCurrFrameResource->PassCB->Resource()->GetGPUVirtualAddress();
+	//g_commandList->SetGraphicsRootConstantBufferView(2, passCBAddress);				// 슬롯 1, 프레임당 한번만
+	//// 큐브맵
+	//CD3DX12_GPU_DESCRIPTOR_HANDLE cubeHandle(mSrvHeap->GetGPUDescriptorHandleForHeapStart());
+	//cubeHandle.Offset(1, g_cbvSrvUavDescriptorSize);						// 슬롯 1 = 큐브맵
+	//g_commandList->SetGraphicsRootDescriptorTable(3, cubeHandle);			// 루트 파라미터
+	//// 노멀맵
+	//CD3DX12_GPU_DESCRIPTOR_HANDLE normalHandle(mSrvHeap->GetGPUDescriptorHandleForHeapStart());
+	//normalHandle.Offset(2, g_cbvSrvUavDescriptorSize);						// 슬롯 2 = 노멀맵
+	//g_commandList->SetGraphicsRootDescriptorTable(4, normalHandle);			// 루트 파라미터 4 = t3
+	//// 섀도맵
+	//CD3DX12_GPU_DESCRIPTOR_HANDLE shadowHandle(mSrvHeap->GetGPUDescriptorHandleForHeapStart());
+	//shadowHandle.Offset(3, g_cbvSrvUavDescriptorSize);						// 슬롯 3 = 섀도맵
+	//g_commandList->SetGraphicsRootDescriptorTable(5, shadowHandle);			// 루트 파라미터 5 = t4
+	//// 메인 = GPU 컬링 결과
+	//g_commandList->SetGraphicsRootShaderResourceView(6, mCulledIndexBuffer->GetGPUVirtualAddress());
+	//g_commandList->SetGraphicsRoot32BitConstant(7, 0, 0);			// 카메라 목록: offset NumObjects
 
 
 	// 정점/인덱스
@@ -647,6 +650,40 @@ void Init::Draw()
 		g_commandList->ResourceBarrier(1, &toSrv);
 	}
 	// ===== 노멀-깊이 패스 끝 =====
+
+	// ===== SSAO 패스 =====
+	{
+		CD3DX12_RESOURCE_BARRIER b[2] = 
+		{
+			CD3DX12_RESOURCE_BARRIER::Transition(g_depthStencilBuffer.Get(),
+				D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+			CD3DX12_RESOURCE_BARRIER::Transition(mAoMap.Get(),
+				D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET)
+		};
+		g_commandList->ResourceBarrier(2, b);
+	}
+	auto aoRtv = AoRtv();
+	g_commandList->OMSetRenderTargets(1, &aoRtv, true, nullptr);
+	g_commandList->SetGraphicsRootSignature(mSsaoRootSignature.Get());
+	g_commandList->SetGraphicsRoot32BitConstants(0, sizeof(SsaoConstants) / 4, &mSsaoConstants, 0);
+	g_commandList->SetGraphicsRootDescriptorTable(1, CD3DX12_GPU_DESCRIPTOR_HANDLE(mSrvHeap->GetGPUDescriptorHandleForHeapStart(), 4, g_cbvSrvUavDescriptorSize));
+	g_commandList->SetPipelineState(mSsaoPSO.Get());
+	g_commandList->DrawInstanced(3, 1, 0, 0);
+	{
+		CD3DX12_RESOURCE_BARRIER b[2] =
+		{
+			CD3DX12_RESOURCE_BARRIER::Transition(mAoMap.Get(),
+				D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+			CD3DX12_RESOURCE_BARRIER::Transition(g_depthStencilBuffer.Get(),
+				D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE)
+		};
+		g_commandList->ResourceBarrier(2, b);
+	}
+	// ===== SSAO 패스 끝 =====
+
+	BindSceneRootArgs();									// <- 루트 시그니처 복구
+	g_commandList->IASetVertexBuffers(0, 1, &vbv);
+	g_commandList->IASetIndexBuffer(&ibv);
 
 	// ===== 메인 패스 =====
 	auto toRT = CD3DX12_RESOURCE_BARRIER::Transition(mOffscreenTex.Get(),
@@ -682,26 +719,7 @@ void Init::Draw()
 
 	ID3D12Resource* copySource = nullptr;			// 백버퍼로 복사할 소스
 
-	// ===== SSAO 디버그 (F6): 씬 위에 AO를 덮어씀 =====
-	if (mShowSsao)
-	{
-		auto depthToSrv = CD3DX12_RESOURCE_BARRIER::Transition(g_depthStencilBuffer.Get(),
-			D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-		g_commandList->ResourceBarrier(1, &depthToSrv);
-
-		g_commandList->OMSetRenderTargets(1, &offscreenRtv, true, nullptr);
-		g_commandList->SetGraphicsRootSignature(mSsaoRootSignature.Get());
-		g_commandList->SetGraphicsRoot32BitConstants(0, sizeof(SsaoConstants) / 4, &mSsaoConstants, 0);
-		g_commandList->SetGraphicsRootDescriptorTable(1,
-			CD3DX12_GPU_DESCRIPTOR_HANDLE(heapStart, 4, g_cbvSrvUavDescriptorSize));			// 슬롯 4,5
-		g_commandList->SetPipelineState(mSsaoDebugPSO.Get());
-		g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-		g_commandList->DrawInstanced(3, 1, 0, 0);
-
-		auto depthToWrite = CD3DX12_RESOURCE_BARRIER::Transition(g_depthStencilBuffer.Get(),
-			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-		g_commandList->ResourceBarrier(1, &depthToWrite);
-	}
+	
 	if (mBlurEnabled)
 	{
 		// (C) 블러 실행 -- 오프스크린(RENDER_TARGET 상태)을 입력으로
@@ -940,9 +958,12 @@ void Init::BuildRootSignature()
 
 	CD3DX12_DESCRIPTOR_RANGE shadowTable;
 	shadowTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 4);	// t4(섀도맵)
+
+	CD3DX12_DESCRIPTOR_RANGE ssaoTable;
+	ssaoTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 6);		// t6(AO맵)
 	
 	// cbv의 힙을 사용하지 않고 루트 디스크립터 방식으로 GPU 주소로 바로 때려박기 때문에 heap(공간), table(참조)를 안만들어도 됨.
-	CD3DX12_ROOT_PARAMETER slotRootParameter[8];
+	CD3DX12_ROOT_PARAMETER slotRootParameter[9];
 	slotRootParameter[0].InitAsDescriptorTable(1, &texTable, D3D12_SHADER_VISIBILITY_PIXEL);		// t0 텍스처	
 	slotRootParameter[1].InitAsShaderResourceView(1);												// t1 - 물체별 (1)은 레지스터 t1을 뜻함.
 	slotRootParameter[2].InitAsConstantBufferView(1);												// b1 - 패스별
@@ -950,7 +971,8 @@ void Init::BuildRootSignature()
 	slotRootParameter[4].InitAsDescriptorTable(1, &normalTable, D3D12_SHADER_VISIBILITY_PIXEL);		// t3 노멀맵
 	slotRootParameter[5].InitAsDescriptorTable(1, &shadowTable, D3D12_SHADER_VISIBILITY_PIXEL);		// t4 섀도맵
 	slotRootParameter[6].InitAsShaderResourceView(5);												// t5 가시 인덱스 목록
-	slotRootParameter[7].InitAsConstants(1,2);														// b2 인덱스 오프셋(uint 1개)
+	slotRootParameter[7].InitAsConstants(2,2);														// b2 인덱스 오프셋(uint 1개) + 디버그 플래그
+	slotRootParameter[8].InitAsDescriptorTable(1, &ssaoTable, D3D12_SHADER_VISIBILITY_PIXEL);		// t6 AO맵
 
 	// 정적 샘플러 - 지난번 얘기한 그 방식, 별도 힙 불필요
 	CD3DX12_STATIC_SAMPLER_DESC linearWrap(
@@ -971,7 +993,7 @@ void Init::BuildRootSignature()
 
 	std::array<CD3DX12_STATIC_SAMPLER_DESC, 2> samplers = { linearWrap, shadowSampler };
 
-	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(8, slotRootParameter, 
+	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(9, slotRootParameter, 
 		(UINT)samplers.size(), samplers.data(),
 		D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
@@ -1293,7 +1315,7 @@ void Init::BuildOffscreenViews()
 {
 	// 오프스크린 RTV 힙 (1개)
 	D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc = {};
-	rtvHeapDesc.NumDescriptors = 2;													// 0: 오프스크린, 1: 노멀맵 RT
+	rtvHeapDesc.NumDescriptors = 3;													// 0: 오프스크린, 1: 노멀맵 RT
 	rtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
 	rtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
 	ThrowIfFailed(g_device->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&mOffscreenRtvHeap)));
@@ -1698,10 +1720,58 @@ void Init::BuildSsaoPSO()
 	desc.SampleMask = UINT_MAX;
 	desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
 	desc.NumRenderTargets = 1;
-	desc.RTVFormats[0] = mBackBufferFormat;										// 디버그: 오프스크린에 바로
+	desc.RTVFormats[0] = mAoMapFormat;										// 기존: mBackBufferFormat
 	desc.SampleDesc.Count = 1;
 	desc.DSVFormat = DXGI_FORMAT_UNKNOWN;
-	ThrowIfFailed(g_device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&mSsaoDebugPSO)));
+	ThrowIfFailed(g_device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&mSsaoPSO)));
+}
+
+void Init::BuildAoMapResource()
+{
+	auto desc = CD3DX12_RESOURCE_DESC::Tex2D(mAoMapFormat, mClientWidth, mClientHeight, 
+		1, 1, 1, 0, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+
+	D3D12_CLEAR_VALUE clear = {};
+	clear.Format = mAoMapFormat;
+	clear.Color[0] = 1.0f;						// 1= 가림 없음
+
+	auto heap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+	ThrowIfFailed(g_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, 
+		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clear, IID_PPV_ARGS(&mAoMap)));
+
+	g_device->CreateRenderTargetView(mAoMap.Get(), nullptr, AoRtv());
+
+	D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
+	srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	srv.Format = mAoMapFormat;
+	srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+	srv.Texture2D.MipLevels = 1;
+	g_device->CreateShaderResourceView(mAoMap.Get(), &srv, CD3DX12_CPU_DESCRIPTOR_HANDLE(mSrvHeap->GetCPUDescriptorHandleForHeapStart(), 6, g_cbvSrvUavDescriptorSize));
+}
+
+D3D12_CPU_DESCRIPTOR_HANDLE Init::AoRtv() const
+{
+	return CD3DX12_CPU_DESCRIPTOR_HANDLE(mOffscreenRtvHeap->GetCPUDescriptorHandleForHeapStart(), 2, g_rtvDescriptorSize);
+}
+
+void Init::BindSceneRootArgs()
+{
+	g_commandList->SetGraphicsRootSignature(mRootSignature.Get());
+	ID3D12DescriptorHeap* heaps[] = { mSrvHeap.Get() };
+	g_commandList->SetDescriptorHeaps(1, heaps);
+
+	auto h = mSrvHeap->GetGPUDescriptorHandleForHeapStart();
+	UINT s = g_cbvSrvUavDescriptorSize;
+	g_commandList->SetGraphicsRootDescriptorTable(0, h);																			// t0 박스
+	g_commandList->SetGraphicsRootShaderResourceView(1, mCurrFrameResource->InstanceBuffer->Resource()->GetGPUVirtualAddress());
+	g_commandList->SetGraphicsRootConstantBufferView(2, mCurrFrameResource->PassCB->Resource()->GetGPUVirtualAddress());			
+	g_commandList->SetGraphicsRootDescriptorTable(3, CD3DX12_GPU_DESCRIPTOR_HANDLE(h, 1, s));										// t2 큐브맵
+	g_commandList->SetGraphicsRootDescriptorTable(4, CD3DX12_GPU_DESCRIPTOR_HANDLE(h, 2, s));										// t3 노멀맵 
+	g_commandList->SetGraphicsRootDescriptorTable(5, CD3DX12_GPU_DESCRIPTOR_HANDLE(h, 3, s));										// t4 섀도맵
+	g_commandList->SetGraphicsRootShaderResourceView(6, mCulledIndexBuffer->GetGPUVirtualAddress());
+	UINT viewCounts[2] = { 0, mShowSsao ? 1u : 0u };
+	g_commandList->SetGraphicsRoot32BitConstants(7, 2, viewCounts, 0);																// b2
+	g_commandList->SetGraphicsRootDescriptorTable(8, CD3DX12_GPU_DESCRIPTOR_HANDLE(h, 6, s));										// t6 AO
 }
 
 /*
@@ -1741,7 +1811,7 @@ void Init::LoadTextures()
 void Init::BuildSrvHeap()
 {
 	D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-	srvHeapDesc.NumDescriptors = 6;										// 0 박스, 1 큐브맵,  2 노멀맵, 3 섀도맵, 4 노멀 RT, 5 깊이
+	srvHeapDesc.NumDescriptors = 7;										// 0 박스, 1 큐브맵,  2 노멀맵, 3 섀도맵, 4 노멀 RT, 5 깊이, 6 AO
 	srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 	srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;		// 필수
 	ThrowIfFailed(g_device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&mSrvHeap)));
