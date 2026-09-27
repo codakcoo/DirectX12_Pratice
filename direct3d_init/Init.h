@@ -34,6 +34,17 @@ struct CullConstants
 	UINT InstanceCount;
 };
 
+struct SsaoConstants
+{
+	XMFLOAT4X4 Proj;
+	XMFLOAT4X4 InvProj;
+	XMFLOAT4X4 ProjTex;
+	float OcclusionRadius = 0.5f;
+	float OcclusionFadeStart = 0.2f;
+	float OcclusionFadeEnd = 1.0f;
+	float SurfaceEpsilon = 0.05f;
+};
+
 
 class Init
 {
@@ -109,6 +120,13 @@ protected:
 	void BuildCullResources();
 	void BuildCullRootSignature();
 	void BuildCullPSO();
+
+	// SSAO
+	void BuildNormalMapResource();
+	D3D12_CPU_DESCRIPTOR_HANDLE NormalMapRtv() const;
+
+	void BuildSsaoRootSignature();
+	void BuildSsaoPSO();
 
 	void LoadTextures();
 	void BuildSrvHeap();
@@ -258,4 +276,15 @@ protected:
 	UINT mGPUVisibleCount = 0;
 
 	ComPtr<ID3D12CommandSignature> mDrawCmdSig = nullptr;
+
+	// SSAO
+	ComPtr<ID3D12Resource> mNormalMapRT = nullptr;
+	ComPtr<ID3D12PipelineState> mDrawNormalsPSO = nullptr;
+	DXGI_FORMAT mNormalMapFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
+	bool mShowNormals = false;
+	
+	ComPtr<ID3D12RootSignature> mSsaoRootSignature = nullptr;
+	ComPtr<ID3D12PipelineState> mSsaoDebugPSO = nullptr;
+	SsaoConstants mSsaoConstants;
+	bool mShowSsao = false;
 };

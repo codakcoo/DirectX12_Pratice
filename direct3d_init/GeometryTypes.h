@@ -48,6 +48,7 @@ struct PassConstants
 
 	DirectX::XMFLOAT4X4 LightViewProj = MathHelper::Identity4x4();			// 월드 -> 라이트 클립
 	DirectX::XMFLOAT4X4 ShadowTransform = MathHelper::Identity4x4();		// 월드 -> 새도맵 UV
+	DirectX::XMFLOAT4X4 View = MathHelper::Identity4x4();
 };
 
 struct MeshGeometry

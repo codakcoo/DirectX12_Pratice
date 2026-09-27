@@ -114,6 +114,10 @@ LRESULT Init::MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 			mBlurEnabled = !mBlurEnabled;
 		else if ((int)wParam == VK_F4)
 			mFrustumCullingEnabled = !mFrustumCullingEnabled;
+		else if ((int)wParam == VK_F5)
+			mShowNormals = !mShowNormals;
+		else if ((int)wParam == VK_F6)
+			mShowSsao = !mShowSsao;
 
 		return 0;
 	}
@@ -281,9 +285,13 @@ bool Init::InitD3D()
 	BuildFrameResources();						// 디바이스만 있으면 되니 근처 아무데나(g_device만 있으됨)
 	BuildRenderItems();
 	BuildPSO();									// 파이프라인 상태 객체 생성
+
+	BuildSsaoRootSignature();
+	BuildSsaoPSO();
 	
 	BuildOffscreenResources();
 	BuildOffscreenViews();
+	BuildNormalMapResource();
 	BuildBlurResources();
 	BuildBlurDescriptorHeap();
 	BuildBlurRootSignature();
@@ -359,6 +367,7 @@ void Init::Update(const GameTimer& gt)
 	//BoundingFrustum::CreateFromMatrix(mCameraFrustum, proj);
 
 	PassConstants passCB;
+	XMStoreFloat4x4(&passCB.View, XMMatrixTranspose(view));
 	XMStoreFloat4x4(&passCB.ViewProj, XMMatrixTranspose(viewProj));
 	XMStoreFloat3(&passCB.EyePosW, pos);
 	passCB.AmbientLight = { 0.25f, 0.25f, 0.35f, 1.0f };
@@ -394,6 +403,13 @@ void Init::Update(const GameTimer& gt)
 	XMMATRIX lightViewProj = lightView * lightProj;
 	XMStoreFloat4x4(&passCB.LightViewProj, XMMatrixTranspose(lightViewProj));
 	XMStoreFloat4x4(&passCB.ShadowTransform, XMMatrixTranspose(lightViewProj * T));
+
+	// -- SSAO 상수 --
+	XMVECTOR projDet = XMMatrixDeterminant(proj);
+	XMMATRIX invProj = XMMatrixInverse(&projDet, proj);
+	XMStoreFloat4x4(&mSsaoConstants.Proj, XMMatrixTranspose(proj));
+	XMStoreFloat4x4(&mSsaoConstants.InvProj, XMMatrixTranspose(invProj));
+	XMStoreFloat4x4(&mSsaoConstants.ProjTex, XMMatrixTranspose(proj*T));
 
 	mCurrFrameResource->PassCB->CopyData(0, passCB);						// 패스는 슬롯 1개
 
@@ -574,66 +590,83 @@ void Init::Draw()
 	g_commandList->RSSetViewports(1, &mScreenViewport);
 	g_commandList->RSSetScissorRects(1, &mScissorRect);
 
-	// -- (A) 오프스크린 텍스처를 덴더 타켓 상태로 전이 --
-	auto toRT = CD3DX12_RESOURCE_BARRIER::Transition(
-		mOffscreenTex.Get(),
-		D3D12_RESOURCE_STATE_COMMON,
-		D3D12_RESOURCE_STATE_RENDER_TARGET);
-	g_commandList->ResourceBarrier(1, &toRT);
-
-	// -- (B) 오프스크린을 렌더 타켓으로 설정하고 씬 그리기 --
-	auto offscreenRtv = OffscreenRtv();
-	auto dsv = DepthStencilView();
-
-	const float clearColor[] = { 0.68f, 0.77f, 0.87f, 1.0f };			// LightSteelBlue
-	g_commandList->ClearRenderTargetView(offscreenRtv, clearColor, 0, nullptr);
-	g_commandList->ClearDepthStencilView(dsv,
-		D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
-
-	g_commandList->OMSetRenderTargets(1, &offscreenRtv, true, &dsv);		// <- 백버퍼 아님!
-
+	// -- 공용 바인딩 (노멀 패스와 메인 패스가 같이 씀)
 	g_commandList->SetGraphicsRootSignature(mRootSignature.Get());
-
 	ID3D12DescriptorHeap* srvHeaps[] = { mSrvHeap.Get() };
 	g_commandList->SetDescriptorHeaps(1, srvHeaps);
-	g_commandList->SetGraphicsRootDescriptorTable(0, mSrvHeap->GetGPUDescriptorHandleForHeapStart());
 
+	auto heapStart = mSrvHeap->GetGPUDescriptorHandleForHeapStart();
+	g_commandList->SetGraphicsRootDescriptorTable(0, heapStart);
 	// t1 인스턴스 버퍼
 	g_commandList->SetGraphicsRootShaderResourceView(1, mCurrFrameResource->InstanceBuffer->Resource()->GetGPUVirtualAddress());
-
 	// b1 패스
 	D3D12_GPU_VIRTUAL_ADDRESS passCBAddress = mCurrFrameResource->PassCB->Resource()->GetGPUVirtualAddress();
 	g_commandList->SetGraphicsRootConstantBufferView(2, passCBAddress);				// 슬롯 1, 프레임당 한번만
-
 	// 큐브맵
 	CD3DX12_GPU_DESCRIPTOR_HANDLE cubeHandle(mSrvHeap->GetGPUDescriptorHandleForHeapStart());
 	cubeHandle.Offset(1, g_cbvSrvUavDescriptorSize);						// 슬롯 1 = 큐브맵
 	g_commandList->SetGraphicsRootDescriptorTable(3, cubeHandle);			// 루트 파라미터
-
 	// 노멀맵
 	CD3DX12_GPU_DESCRIPTOR_HANDLE normalHandle(mSrvHeap->GetGPUDescriptorHandleForHeapStart());
 	normalHandle.Offset(2, g_cbvSrvUavDescriptorSize);						// 슬롯 2 = 노멀맵
 	g_commandList->SetGraphicsRootDescriptorTable(4, normalHandle);			// 루트 파라미터 4 = t3
-
 	// 섀도맵
 	CD3DX12_GPU_DESCRIPTOR_HANDLE shadowHandle(mSrvHeap->GetGPUDescriptorHandleForHeapStart());
 	shadowHandle.Offset(3, g_cbvSrvUavDescriptorSize);						// 슬롯 3 = 섀도맵
 	g_commandList->SetGraphicsRootDescriptorTable(5, shadowHandle);			// 루트 파라미터 5 = t4
-
 	// 메인 = GPU 컬링 결과
 	g_commandList->SetGraphicsRootShaderResourceView(6, mCulledIndexBuffer->GetGPUVirtualAddress());
 	g_commandList->SetGraphicsRoot32BitConstant(7, 0, 0);			// 카메라 목록: offset NumObjects
+
 
 	// 정점/인덱스
 	g_commandList->IASetVertexBuffers(0, 1, &vbv);
 	g_commandList->IASetIndexBuffer(&ibv);
 	g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-	// 드로우콜 1번으로 27개
-	g_commandList->SetPipelineState(mOpaquePSO.Get());
-	//g_commandList->DrawIndexedInstanced(36, mVisibleCount, 0, 0, 0);			// 기존
-	// 인스턴스 개수를 CPU가 전혀 모르는 상태에서 GPU가 쓴 InstanceCount로 그대로 그리게 된다.
+	auto dsv = DepthStencilView();
+	// ===== 노멀-깊이 패스 =====
+	{
+		auto toRT = CD3DX12_RESOURCE_BARRIER::Transition(mNormalMapRT.Get(),
+			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+		g_commandList->ResourceBarrier(1, &toRT);
+	}
+
+	auto normalRtv = NormalMapRtv();
+	const float normalClear[] = { 0.0f, 0.0f, 1.0f, 0.0f };
+	g_commandList->ClearRenderTargetView(normalRtv, normalClear, 0, nullptr);
+	g_commandList->ClearDepthStencilView(dsv,
+		D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
+	g_commandList->OMSetRenderTargets(1, &normalRtv, true, &dsv);		
+
+	g_commandList->SetPipelineState(mDrawNormalsPSO.Get());
 	g_commandList->ExecuteIndirect(mDrawCmdSig.Get(), 1, mDrawArgsBuffer.Get(), 0, nullptr, 0);
+	{
+		auto toSrv = CD3DX12_RESOURCE_BARRIER::Transition(mNormalMapRT.Get(),
+			D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+		g_commandList->ResourceBarrier(1, &toSrv);
+	}
+	// ===== 노멀-깊이 패스 끝 =====
+
+	// ===== 메인 패스 =====
+	auto toRT = CD3DX12_RESOURCE_BARRIER::Transition(mOffscreenTex.Get(),
+		D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+	g_commandList->ResourceBarrier(1, &toRT);
+
+	// -- (B) 오프스크린을 렌더 타켓으로 설정하고 씬 그리기 --
+	auto offscreenRtv = OffscreenRtv();
+	const float clearColor[] = { 0.68f, 0.77f, 0.87f, 1.0f };			// LightSteelBlue
+	g_commandList->ClearRenderTargetView(offscreenRtv, clearColor, 0, nullptr);
+	// 깊이 clear 없음 (프리패스 깊이 재사용)
+	g_commandList->OMSetRenderTargets(1, &offscreenRtv, true, &dsv);
+	g_commandList->SetPipelineState(mOpaquePSO.Get());					// EQUAL 테스트
+	g_commandList->ExecuteIndirect(mDrawCmdSig.Get(), 1, mDrawArgsBuffer.Get(), 0, nullptr, 0);
+
+	//// 드로우콜 1번으로 27개
+	//g_commandList->SetPipelineState(mShowNormals ? mDrawNormalsPSO.Get() : mOpaquePSO.Get());
+	////g_commandList->DrawIndexedInstanced(36, mVisibleCount, 0, 0, 0);			// 기존
+	//// 인스턴스 개수를 CPU가 전혀 모르는 상태에서 GPU가 쓴 InstanceCount로 그대로 그리게 된다.
+	//g_commandList->ExecuteIndirect(mDrawCmdSig.Get(), 1, mDrawArgsBuffer.Get(), 0, nullptr, 0);
 
 	// 스카이박스
 	g_commandList->SetPipelineState(mSkyPSO.Get());
@@ -649,6 +682,26 @@ void Init::Draw()
 
 	ID3D12Resource* copySource = nullptr;			// 백버퍼로 복사할 소스
 
+	// ===== SSAO 디버그 (F6): 씬 위에 AO를 덮어씀 =====
+	if (mShowSsao)
+	{
+		auto depthToSrv = CD3DX12_RESOURCE_BARRIER::Transition(g_depthStencilBuffer.Get(),
+			D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+		g_commandList->ResourceBarrier(1, &depthToSrv);
+
+		g_commandList->OMSetRenderTargets(1, &offscreenRtv, true, nullptr);
+		g_commandList->SetGraphicsRootSignature(mSsaoRootSignature.Get());
+		g_commandList->SetGraphicsRoot32BitConstants(0, sizeof(SsaoConstants) / 4, &mSsaoConstants, 0);
+		g_commandList->SetGraphicsRootDescriptorTable(1,
+			CD3DX12_GPU_DESCRIPTOR_HANDLE(heapStart, 4, g_cbvSrvUavDescriptorSize));			// 슬롯 4,5
+		g_commandList->SetPipelineState(mSsaoDebugPSO.Get());
+		g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		g_commandList->DrawInstanced(3, 1, 0, 0);
+
+		auto depthToWrite = CD3DX12_RESOURCE_BARRIER::Transition(g_depthStencilBuffer.Get(),
+			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+		g_commandList->ResourceBarrier(1, &depthToWrite);
+	}
 	if (mBlurEnabled)
 	{
 		// (C) 블러 실행 -- 오프스크린(RENDER_TARGET 상태)을 입력으로
@@ -1066,15 +1119,26 @@ void Init::BuildRenderItems()
 
 void Init::BuildShadersAndInputLayout()
 {
+	// 픽셀
 	mShaders["defaultVS"] = d3dUtil::CompileShader(L"Shaders\\color.hlsl", nullptr, "VS", "vs_5_0");
 	mShaders["defaultPS"] = d3dUtil::CompileShader(L"Shaders\\color.hlsl", nullptr, "PS", "ps_5_0");
 
+	// 스카이
 	mShaders["skyVS"] = d3dUtil::CompileShader(L"Shaders\\sky.hlsl", nullptr, "VS", "vs_5_0");
 	mShaders["skyPS"] = d3dUtil::CompileShader(L"Shaders\\sky.hlsl", nullptr, "PS", "ps_5_0");
 
+	// 섀도우
 	mShaders["shadowVS"] = d3dUtil::CompileShader(L"Shaders\\shadow.hlsl", nullptr, "VS", "vs_5_0");
 
+	// 섀도우 컴퓨트 컬링
 	mShaders["cullCS"] = d3dUtil::CompileShader(L"Shaders\\cull.hlsl", nullptr, "CullCS", "cs_5_0");
+
+	// SSAO
+	mShaders["drawNormalsVS"] = d3dUtil::CompileShader(L"Shaders\\drawNormals.hlsl", nullptr, "VS", "vs_5_0");
+	mShaders["drawNormalsPS"] = d3dUtil::CompileShader(L"Shaders\\drawNormals.hlsl", nullptr, "PS", "ps_5_0");
+
+	mShaders["ssaoVS"] = d3dUtil::CompileShader(L"Shaders\\ssao.hlsl", nullptr, "VS", "vs_5_0");
+	mShaders["ssaoPS"] = d3dUtil::CompileShader(L"Shaders\\ssao.hlsl", nullptr, "PS", "ps_5_0");
 
 	mInputLayout =
 	{
@@ -1112,11 +1176,17 @@ void Init::BuildPSO()
 	opaquePsoDesc.SampleDesc.Quality = m4xMsaaState ? (m4xMsaaQuality - 1) : 0;
 	opaquePsoDesc.DSVFormat = mDepthStencilFormat;
 
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC basePsoDesc = opaquePsoDesc;			// LESS + 깊이 쓰기
+	
+	// 메인 패스: 프리패스 깊이와 픽셀만, 깊이는 안 씀
+	opaquePsoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_EQUAL;
+	opaquePsoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+
 	ThrowIfFailed(g_device->CreateGraphicsPipelineState(&opaquePsoDesc, IID_PPV_ARGS(&mOpaquePSO)));
 
 
 	// 반투명 PSO - 위 설정을 복사해서 블렌드만 교체
-	D3D12_GRAPHICS_PIPELINE_STATE_DESC transparentPsoDesc = opaquePsoDesc;
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC transparentPsoDesc = basePsoDesc;
 	
 	D3D12_RENDER_TARGET_BLEND_DESC transparentBlendDesc = {};
 	transparentBlendDesc.BlendEnable = true;
@@ -1134,7 +1204,7 @@ void Init::BuildPSO()
 	ThrowIfFailed(g_device->CreateGraphicsPipelineState(&transparentPsoDesc, IID_PPV_ARGS(&mTransparentPSO)));
 
 	// 하늘맵 PSO
-	D3D12_GRAPHICS_PIPELINE_STATE_DESC skyPsoDesc = opaquePsoDesc;
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC skyPsoDesc = basePsoDesc;
 	// 컬링을 안쪽 면으로 (큐브 안에서 움직이기 때문)
 	skyPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;			// 또는 FRONT
 	// 깊이를 LESS_EQUAL (z=1.0인 스카이박스가 깊이버퍼 claer값 1.0과 같아도 통과)
@@ -1153,7 +1223,7 @@ void Init::BuildPSO()
 	ThrowIfFailed(g_device->CreateGraphicsPipelineState(&skyPsoDesc, IID_PPV_ARGS(&mSkyPSO)));
 
 	// 섀도맵 PSO
-	D3D12_GRAPHICS_PIPELINE_STATE_DESC shadowPsoDesc = opaquePsoDesc;
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC shadowPsoDesc = basePsoDesc;
 	shadowPsoDesc.RasterizerState.DepthBias = 100000;						// 섀도 애크로 방지
 	shadowPsoDesc.RasterizerState.DepthBiasClamp = 0.0f;
 	shadowPsoDesc.RasterizerState.SlopeScaledDepthBias = 1.0f;
@@ -1170,6 +1240,23 @@ void Init::BuildPSO()
 	shadowPsoDesc.DSVFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
 
 	ThrowIfFailed(g_device->CreateGraphicsPipelineState(&shadowPsoDesc, IID_PPV_ARGS(&mShadowPSO)));
+
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC normalsPsoDesc = basePsoDesc;
+	normalsPsoDesc.VS = 
+	{ 
+		reinterpret_cast<BYTE*>(mShaders["drawNormalsVS"]->GetBufferPointer()),
+		mShaders["drawNormalsVS"]->GetBufferSize()
+	};
+	normalsPsoDesc.PS = 
+	{
+		reinterpret_cast<BYTE*>(mShaders["drawNormalsPS"]->GetBufferPointer()),
+		mShaders["drawNormalsPS"]->GetBufferSize()
+	};
+	normalsPsoDesc.RTVFormats[0] = mNormalMapFormat;			// float RT
+	normalsPsoDesc.SampleDesc.Count = 1;
+	normalsPsoDesc.SampleDesc.Quality = 0;
+	ThrowIfFailed(g_device->CreateGraphicsPipelineState(&normalsPsoDesc, IID_PPV_ARGS(&mDrawNormalsPSO)));
+
 }
 
 void Init::BuildOffscreenResources()
@@ -1206,7 +1293,7 @@ void Init::BuildOffscreenViews()
 {
 	// 오프스크린 RTV 힙 (1개)
 	D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc = {};
-	rtvHeapDesc.NumDescriptors = 1;
+	rtvHeapDesc.NumDescriptors = 2;													// 0: 오프스크린, 1: 노멀맵 RT
 	rtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
 	rtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
 	ThrowIfFailed(g_device->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&mOffscreenRtvHeap)));
@@ -1527,6 +1614,96 @@ void Init::BuildCullPSO()
 	ThrowIfFailed(g_device->CreateCommandSignature(&sigDesc, nullptr, IID_PPV_ARGS(&mDrawCmdSig)));
 }
 
+void Init::BuildNormalMapResource()
+{
+	auto desc = CD3DX12_RESOURCE_DESC::Tex2D(mNormalMapFormat, mClientWidth, mClientHeight, 
+		1, 1, 1, 0, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+
+	D3D12_CLEAR_VALUE clear = {};
+	clear.Format = mNormalMapFormat;
+	clear.Color[0] = 0.0f; clear.Color[1] = 0.0f; clear.Color[2] = 1.0f; clear.Color[3] = 0.0f;
+
+	auto heap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+	ThrowIfFailed(g_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, 
+		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clear, IID_PPV_ARGS(&mNormalMapRT)));
+
+	// RTV (오프스크린 RTV 힙 슬롯 1)
+	g_device->CreateRenderTargetView(mNormalMapRT.Get(), nullptr, NormalMapRtv());
+
+	// SRV (SRV 힙 슬롯 4)
+	D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
+	srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	srv.Format = mNormalMapFormat;
+	srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+	srv.Texture2D.MipLevels = 1;
+	g_device->CreateShaderResourceView(mNormalMapRT.Get(), &srv, 
+		CD3DX12_CPU_DESCRIPTOR_HANDLE(mSrvHeap->GetCPUDescriptorHandleForHeapStart(), 4, g_cbvSrvUavDescriptorSize));
+}
+
+D3D12_CPU_DESCRIPTOR_HANDLE Init::NormalMapRtv() const
+{
+	return CD3DX12_CPU_DESCRIPTOR_HANDLE(mOffscreenRtvHeap->GetCPUDescriptorHandleForHeapStart(), 1, g_rtvDescriptorSize);
+}
+
+void Init::BuildSsaoRootSignature()
+{
+	CD3DX12_DESCRIPTOR_RANGE srvTable;
+	srvTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0);				// t0 노멀, t1 깊이 (힙 슬롯 4, 5가 연속)
+
+	CD3DX12_ROOT_PARAMETER params[2];
+	params[0].InitAsConstants(sizeof(SsaoConstants) / 4, 0);			// b0: 52 DWORD (최대 64)
+	params[1].InitAsDescriptorTable(1, &srvTable, D3D12_SHADER_VISIBILITY_PIXEL);
+
+	CD3DX12_STATIC_SAMPLER_DESC pointClamp(0, D3D12_FILTER_MIN_MAG_MIP_POINT,
+		D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+
+	CD3DX12_STATIC_SAMPLER_DESC depthSampler(1, D3D12_FILTER_MIN_MAG_MIP_POINT,
+		D3D12_TEXTURE_ADDRESS_MODE_BORDER, D3D12_TEXTURE_ADDRESS_MODE_BORDER, D3D12_TEXTURE_ADDRESS_MODE_BORDER,
+		0.0f, 0, D3D12_COMPARISON_FUNC_ALWAYS,							// 쓰지 않음
+		D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE);						// 화면 밖 = 깊이 1
+
+	CD3DX12_STATIC_SAMPLER_DESC samplers[2] = { pointClamp, depthSampler };
+
+	CD3DX12_ROOT_SIGNATURE_DESC desc(2, params, 2, samplers, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+	ComPtr<ID3DBlob> serialzed, error;
+	HRESULT hr = D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1_0, serialzed.GetAddressOf(), error.GetAddressOf());
+
+	if(error)
+		OutputDebugStringA((char*)error->GetBufferPointer());
+	ThrowIfFailed(hr);
+	ThrowIfFailed(g_device->CreateRootSignature(0, serialzed->GetBufferPointer(), serialzed->GetBufferSize(), IID_PPV_ARGS(&mSsaoRootSignature)));
+}
+
+void Init::BuildSsaoPSO()
+{
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
+	desc.InputLayout = { nullptr, 0 };							// 정점 버퍼 없음
+	desc.pRootSignature = mSsaoRootSignature.Get();
+	desc.VS = 
+	{
+		reinterpret_cast<BYTE*>(mShaders["ssaoVS"]->GetBufferPointer()),
+		mShaders["ssaoVS"]->GetBufferSize()
+	};
+	desc.PS = 
+	{
+		reinterpret_cast<BYTE*>(mShaders["ssaoPS"]->GetBufferPointer()),
+		mShaders["ssaoPS"]->GetBufferSize()
+	};
+	desc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+	desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+	desc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+	desc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+	desc.DepthStencilState.DepthEnable = false;									// 깊이는 SRV로 읽기만
+	desc.SampleMask = UINT_MAX;
+	desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	desc.NumRenderTargets = 1;
+	desc.RTVFormats[0] = mBackBufferFormat;										// 디버그: 오프스크린에 바로
+	desc.SampleDesc.Count = 1;
+	desc.DSVFormat = DXGI_FORMAT_UNKNOWN;
+	ThrowIfFailed(g_device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&mSsaoDebugPSO)));
+}
+
 /*
 * 텍스처 로드 함수는 반드시 커맨드 리스트가 열려있을 떄 호출해야 됨.
 */
@@ -1564,7 +1741,7 @@ void Init::LoadTextures()
 void Init::BuildSrvHeap()
 {
 	D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-	srvHeapDesc.NumDescriptors = 4;										// 2개 (박스 + 배경)
+	srvHeapDesc.NumDescriptors = 6;										// 0 박스, 1 큐브맵,  2 노멀맵, 3 섀도맵, 4 노멀 RT, 5 깊이
 	srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 	srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;		// 필수
 	ThrowIfFailed(g_device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&mSrvHeap)));
@@ -1698,7 +1875,7 @@ void Init::OnResize()
 	depthStencilDesc.Height = mClientHeight;
 	depthStencilDesc.DepthOrArraySize = 1;
 	depthStencilDesc.MipLevels = 1;
-	depthStencilDesc.Format = mDepthStencilFormat;
+	depthStencilDesc.Format = DXGI_FORMAT_R24G8_TYPELESS;					// 기존 mDepthStencilFormat
 	depthStencilDesc.SampleDesc.Count = m4xMsaaState ? 4 : 1;
 	depthStencilDesc.SampleDesc.Quality = m4xMsaaState ? (m4xMsaaQuality - 1) : 0;
 	depthStencilDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
@@ -1737,6 +1914,16 @@ void Init::OnResize()
 		D3D12_RESOURCE_STATE_COMMON,
 		D3D12_RESOURCE_STATE_DEPTH_WRITE);
 	g_commandList->ResourceBarrier(1, &barrier);
+
+	// 깊이 SRV(힙 슬롯5)
+	// 리사이즈 때마다 깊이 버퍼가 새로 만들어지기 떄문에 SRV도 여기서 만들어야 함.
+	CD3DX12_CPU_DESCRIPTOR_HANDLE handle = {mSrvHeap->GetCPUDescriptorHandleForHeapStart(), 5, g_cbvSrvUavDescriptorSize};
+	D3D12_SHADER_RESOURCE_VIEW_DESC depthSrv = {};
+	depthSrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	depthSrv.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+	depthSrv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+	depthSrv.Texture2D.MipLevels = 1;
+	g_device->CreateShaderResourceView(g_depthStencilBuffer.Get(), &depthSrv, handle);
 
 /*		블록 끝난 후		*/
 	// 명령 목록을 닫은 후에 목록을 가져와 큐에 실어서 실행해준다.
