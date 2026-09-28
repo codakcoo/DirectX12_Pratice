@@ -1782,6 +1782,7 @@ void Init::BuildAoMapResource()
 	{
 		ThrowIfFailed(g_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
 			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clear, IID_PPV_ARGS(targets[i]->GetAddressOf())));
+		maps[i] = targets[i]->Get();
 		g_device->CreateRenderTargetView(maps[i], nullptr, AoRtv(i));
 		g_device->CreateShaderResourceView(maps[i], &srv, CD3DX12_CPU_DESCRIPTOR_HANDLE(mSrvHeap->GetCPUDescriptorHandleForHeapStart(), 6 + i, g_cbvSrvUavDescriptorSize));
 	}
@@ -1828,13 +1829,14 @@ void Init::BlurAoMap(int blurCount)
 
 void Init::DrawAoBlurPass(bool horizontal)
 {
-	ID3D12Resource* output = horizontal ? mAoMap.Get() : mAoMap1.Get();
+	ID3D12Resource* output = horizontal ? mAoMap1.Get() : mAoMap.Get();
 	int inputSlot= horizontal ? 6 : 7;
 	auto outRtv = AoRtv(horizontal ? 1 : 0);
 
 	auto toRT = CD3DX12_RESOURCE_BARRIER::Transition(output,
 		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
 	g_commandList->ResourceBarrier(1, &toRT);
+	g_commandList->OMSetRenderTargets(1, &outRtv, true, nullptr);
 
 	mSsaoBlurConstants.Horizontal = horizontal ? 1u : 0u;
 	g_commandList->SetGraphicsRoot32BitConstants(0, sizeof(SsaoBlurConstants) / 4, &mSsaoBlurConstants, 0);
@@ -1942,7 +1944,7 @@ void Init::LoadTextures()
 void Init::BuildSrvHeap()
 {
 	D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-	srvHeapDesc.NumDescriptors = 7;										// 0 박스, 1 큐브맵,  2 노멀맵, 3 섀도맵, 4 노멀 RT, 5 깊이, 6 AO
+	srvHeapDesc.NumDescriptors = 8;										// 0 박스, 1 큐브맵,  2 노멀맵, 3 섀도맵, 4 노멀 RT, 5 깊이, 6 AO0, 7 AO1
 	srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 	srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;		// 필수
 	ThrowIfFailed(g_device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&mSrvHeap)));
