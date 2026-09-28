@@ -45,6 +45,14 @@ struct SsaoConstants
 	float SurfaceEpsilon = 0.05f;
 };
 
+struct SsaoBlurConstants
+{
+	float Weights[12];				// HLSL float4[3]과 1:1
+	int BlurRadius;
+	UINT Horizontal;
+	float InvWidth, InvHeight;
+	float Proj22, Proj32;			// 깊이 복원용 (투영 행렬 두 원소만)
+};
 
 class Init
 {
@@ -128,8 +136,14 @@ protected:
 	void BuildSsaoRootSignature();
 	void BuildSsaoPSO();
 	void BuildAoMapResource();
-	D3D12_CPU_DESCRIPTOR_HANDLE AoRtv() const;
+	D3D12_CPU_DESCRIPTOR_HANDLE AoRtv(int i) const;
 	void BindSceneRootArgs();						// 메인 루트 시그니처 바인딩 묶음
+
+	// 엣지 보존 블러
+	void BlurAoMap(int blurCount);
+	void DrawAoBlurPass(bool horizontal);
+	void BuildSsaoBlurRootSignature();
+	void BuildSsaoBlurPSO();
 
 	void LoadTextures();
 	void BuildSrvHeap();
@@ -294,4 +308,11 @@ protected:
 	// AO
 	ComPtr<ID3D12Resource> mAoMap = nullptr;
 	DXGI_FORMAT mAoMapFormat = DXGI_FORMAT_R16_UNORM;
+
+	// 엣지 보존 블러
+	ComPtr<ID3D12Resource> mAoMap1 = nullptr;
+	ComPtr<ID3D12RootSignature> mSsaoBlurRootSignature = nullptr;
+	ComPtr<ID3D12PipelineState> mSsaoBlurPSO = nullptr;
+	SsaoBlurConstants mSsaoBlurConstants = {};
+	bool mSsaoBlurEnabled = true;
 };

@@ -103,5 +103,8 @@
     <None Include="Shaders\ssao.hlsl">
       <Filter>Shaders</Filter>
     </None>
+    <None Include="Shaders\ssaoBlur.hlsl">
+      <Filter>Shaders</Filter>
+    </None>
   </ItemGroup>
 </Project>

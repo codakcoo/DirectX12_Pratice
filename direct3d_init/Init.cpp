@@ -118,6 +118,8 @@ LRESULT Init::MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 			mShowNormals = !mShowNormals;
 		else if ((int)wParam == VK_F6)
 			mShowSsao = !mShowSsao;
+		else if ((int)wParam == VK_F7)
+			mSsaoBlurEnabled = !mSsaoBlurEnabled;
 
 		return 0;
 	}
@@ -288,6 +290,9 @@ bool Init::InitD3D()
 
 	BuildSsaoRootSignature();
 	BuildSsaoPSO();
+
+	BuildSsaoBlurRootSignature();
+	BuildSsaoBlurPSO();
 	
 	BuildOffscreenResources();
 	BuildOffscreenViews();
@@ -411,6 +416,18 @@ void Init::Update(const GameTimer& gt)
 	XMStoreFloat4x4(&mSsaoConstants.Proj, XMMatrixTranspose(proj));
 	XMStoreFloat4x4(&mSsaoConstants.InvProj, XMMatrixTranspose(invProj));
 	XMStoreFloat4x4(&mSsaoConstants.ProjTex, XMMatrixTranspose(proj*T));
+
+	// --SSAO 상수 블러 --
+	auto w = CalcGaussWeights(2.5f);
+	for(size_t i = 0; i < w.size(); ++i) mSsaoBlurConstants.Weights[i] = w[i];
+	mSsaoBlurConstants.BlurRadius = (int)w.size() / 2;
+	mSsaoBlurConstants.InvWidth = 1.0f / mClientWidth;
+	mSsaoBlurConstants.InvHeight = 1.0f / mClientHeight;
+
+	XMFLOAT4X4 P;
+	XMStoreFloat4x4(&P, proj);											// 전치 안 한 원본
+	mSsaoBlurConstants.Proj22 = P._33;									// HLSL gProj[2][2]
+	mSsaoBlurConstants.Proj32 = P._43;									// HLSL gProj[3][2]
 
 	mCurrFrameResource->PassCB->CopyData(0, passCB);						// 패스는 슬롯 1개
 
@@ -662,22 +679,31 @@ void Init::Draw()
 		};
 		g_commandList->ResourceBarrier(2, b);
 	}
-	auto aoRtv = AoRtv();
+	auto aoRtv = AoRtv(0);
 	g_commandList->OMSetRenderTargets(1, &aoRtv, true, nullptr);
 	g_commandList->SetGraphicsRootSignature(mSsaoRootSignature.Get());
 	g_commandList->SetGraphicsRoot32BitConstants(0, sizeof(SsaoConstants) / 4, &mSsaoConstants, 0);
 	g_commandList->SetGraphicsRootDescriptorTable(1, CD3DX12_GPU_DESCRIPTOR_HANDLE(mSrvHeap->GetGPUDescriptorHandleForHeapStart(), 4, g_cbvSrvUavDescriptorSize));
 	g_commandList->SetPipelineState(mSsaoPSO.Get());
-	g_commandList->DrawInstanced(3, 1, 0, 0);
+	g_commandList->DrawInstanced(3, 1, 0, 0);				// SSAO
+	
+	// AO 0: RT -> SRV
 	{
-		CD3DX12_RESOURCE_BARRIER b[2] =
-		{
-			CD3DX12_RESOURCE_BARRIER::Transition(mAoMap.Get(),
-				D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
-			CD3DX12_RESOURCE_BARRIER::Transition(g_depthStencilBuffer.Get(),
-				D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE)
-		};
-		g_commandList->ResourceBarrier(2, b);
+		auto b = CD3DX12_RESOURCE_BARRIER::Transition(mAoMap.Get(),
+			D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+		g_commandList->ResourceBarrier(1, &b);
+	}
+	
+	// 블러 (깊이가 아직 SRV 상태여야 함)
+	if (mSsaoBlurEnabled)
+		BlurAoMap(2);
+
+	// 깊이: SRV -> DEPTH_WRITE
+	{
+
+		auto b = CD3DX12_RESOURCE_BARRIER::Transition(g_depthStencilBuffer.Get(),
+			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+		g_commandList->ResourceBarrier(1, &b);
 	}
 	// ===== SSAO 패스 끝 =====
 
@@ -1162,6 +1188,10 @@ void Init::BuildShadersAndInputLayout()
 	mShaders["ssaoVS"] = d3dUtil::CompileShader(L"Shaders\\ssao.hlsl", nullptr, "VS", "vs_5_0");
 	mShaders["ssaoPS"] = d3dUtil::CompileShader(L"Shaders\\ssao.hlsl", nullptr, "PS", "ps_5_0");
 
+	// SSAO blur
+	mShaders["ssaoBlurVS"] = d3dUtil::CompileShader(L"Shaders\\ssaoBlur.hlsl", nullptr, "VS", "vs_5_0");
+	mShaders["ssaoBlurPS"] = d3dUtil::CompileShader(L"Shaders\\ssaoBlur.hlsl", nullptr, "PS", "ps_5_0");
+
 	mInputLayout =
 	{
 		{ "POSITION",	0,	DXGI_FORMAT_R32G32B32_FLOAT,	0,	0,							D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
@@ -1315,7 +1345,7 @@ void Init::BuildOffscreenViews()
 {
 	// 오프스크린 RTV 힙 (1개)
 	D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc = {};
-	rtvHeapDesc.NumDescriptors = 3;													// 0: 오프스크린, 1: 노멀맵 RT
+	rtvHeapDesc.NumDescriptors = 4;													// 0: 오프스크린, 1: 노멀맵 RT, 3: AO1
 	rtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
 	rtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
 	ThrowIfFailed(g_device->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&mOffscreenRtvHeap)));
@@ -1334,7 +1364,7 @@ void Init::BuildOffscreenViews()
 void Init::BuildBlurDescriptorHeap()
 {
 	D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
-	heapDesc.NumDescriptors = 5;						// 오프스크린 SRV, 블러0 SRV/UAV, 블러1 SRV/UAV
+	heapDesc.NumDescriptors = 8;						// 오프스크린 SRV, 블러0 SRV/UAV, 블러1 SRV/UAV, 7: AO1
 	heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 	heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 	ThrowIfFailed(g_device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&mBlurHeap)));
@@ -1736,22 +1766,30 @@ void Init::BuildAoMapResource()
 	clear.Color[0] = 1.0f;						// 1= 가림 없음
 
 	auto heap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
-	ThrowIfFailed(g_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, 
-		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clear, IID_PPV_ARGS(&mAoMap)));
 
-	g_device->CreateRenderTargetView(mAoMap.Get(), nullptr, AoRtv());
+	
+
 
 	D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
 	srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 	srv.Format = mAoMapFormat;
 	srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 	srv.Texture2D.MipLevels = 1;
-	g_device->CreateShaderResourceView(mAoMap.Get(), &srv, CD3DX12_CPU_DESCRIPTOR_HANDLE(mSrvHeap->GetCPUDescriptorHandleForHeapStart(), 6, g_cbvSrvUavDescriptorSize));
+
+	ID3D12Resource* maps[2];
+	ComPtr<ID3D12Resource>* targets[2] = { &mAoMap, &mAoMap1 };
+	for (int i = 0; i < 2; ++i)
+	{
+		ThrowIfFailed(g_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clear, IID_PPV_ARGS(targets[i]->GetAddressOf())));
+		g_device->CreateRenderTargetView(maps[i], nullptr, AoRtv(i));
+		g_device->CreateShaderResourceView(maps[i], &srv, CD3DX12_CPU_DESCRIPTOR_HANDLE(mSrvHeap->GetCPUDescriptorHandleForHeapStart(), 6 + i, g_cbvSrvUavDescriptorSize));
+	}
 }
 
-D3D12_CPU_DESCRIPTOR_HANDLE Init::AoRtv() const
+D3D12_CPU_DESCRIPTOR_HANDLE Init::AoRtv(int i) const
 {
-	return CD3DX12_CPU_DESCRIPTOR_HANDLE(mOffscreenRtvHeap->GetCPUDescriptorHandleForHeapStart(), 2, g_rtvDescriptorSize);
+	return CD3DX12_CPU_DESCRIPTOR_HANDLE(mOffscreenRtvHeap->GetCPUDescriptorHandleForHeapStart(), 2 + i, g_rtvDescriptorSize);
 }
 
 void Init::BindSceneRootArgs()
@@ -1772,6 +1810,99 @@ void Init::BindSceneRootArgs()
 	UINT viewCounts[2] = { 0, mShowSsao ? 1u : 0u };
 	g_commandList->SetGraphicsRoot32BitConstants(7, 2, viewCounts, 0);																// b2
 	g_commandList->SetGraphicsRootDescriptorTable(8, CD3DX12_GPU_DESCRIPTOR_HANDLE(h, 6, s));										// t6 AO
+}
+
+void Init::BlurAoMap(int blurCount)
+{
+	g_commandList->SetGraphicsRootSignature(mSsaoBlurRootSignature.Get());
+	g_commandList->SetPipelineState(mSsaoBlurPSO.Get());
+	g_commandList->SetGraphicsRootDescriptorTable(1,
+		CD3DX12_GPU_DESCRIPTOR_HANDLE(mSrvHeap->GetGPUDescriptorHandleForHeapStart(), 4, g_cbvSrvUavDescriptorSize));				// 노멀, 깊이
+
+	for (int i = 0; i < blurCount; ++i)
+	{
+		DrawAoBlurPass(true);				// AO 0 -> AO 1
+		DrawAoBlurPass(false);				// AO 1 -> AO 0
+	}
+}
+
+void Init::DrawAoBlurPass(bool horizontal)
+{
+	ID3D12Resource* output = horizontal ? mAoMap.Get() : mAoMap1.Get();
+	int inputSlot= horizontal ? 6 : 7;
+	auto outRtv = AoRtv(horizontal ? 1 : 0);
+
+	auto toRT = CD3DX12_RESOURCE_BARRIER::Transition(output,
+		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+	g_commandList->ResourceBarrier(1, &toRT);
+
+	mSsaoBlurConstants.Horizontal = horizontal ? 1u : 0u;
+	g_commandList->SetGraphicsRoot32BitConstants(0, sizeof(SsaoBlurConstants) / 4, &mSsaoBlurConstants, 0);
+	g_commandList->SetGraphicsRootDescriptorTable(2, CD3DX12_GPU_DESCRIPTOR_HANDLE(mSrvHeap->GetGPUDescriptorHandleForHeapStart(), inputSlot, g_cbvSrvUavDescriptorSize));
+	g_commandList->DrawInstanced(3, 1, 0, 0);
+
+	auto toSrv = CD3DX12_RESOURCE_BARRIER::Transition(output,
+		D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+	g_commandList->ResourceBarrier(1, &toSrv);
+}
+
+void Init::BuildSsaoBlurRootSignature()
+{
+	CD3DX12_DESCRIPTOR_RANGE ndTable;
+	ndTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0);			// t0, t1 (슬롯4, 5)
+	CD3DX12_DESCRIPTOR_RANGE inTable;
+	inTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 2);			// t2 (슬롯6 또는 7)
+
+	CD3DX12_ROOT_PARAMETER params[3];
+	params[0].InitAsConstants(sizeof(SsaoBlurConstants) / 4, 0);
+	params[1].InitAsDescriptorTable(1, &ndTable, D3D12_SHADER_VISIBILITY_PIXEL);
+	params[2].InitAsDescriptorTable(1, &inTable, D3D12_SHADER_VISIBILITY_PIXEL);
+
+	CD3DX12_STATIC_SAMPLER_DESC pointClamp(0, D3D12_FILTER_MIN_MAG_MIP_POINT,
+		D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+	CD3DX12_STATIC_SAMPLER_DESC depthSampler(1, D3D12_FILTER_MIN_MAG_MIP_POINT,
+		D3D12_TEXTURE_ADDRESS_MODE_BORDER, D3D12_TEXTURE_ADDRESS_MODE_BORDER, D3D12_TEXTURE_ADDRESS_MODE_BORDER,
+		0.0f, 0, D3D12_COMPARISON_FUNC_ALWAYS, D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE);
+	CD3DX12_STATIC_SAMPLER_DESC samplers[2] = { pointClamp, depthSampler };
+
+	CD3DX12_ROOT_SIGNATURE_DESC desc(3, params, 2, samplers, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+	ComPtr<ID3DBlob> serialized, error;
+	HRESULT hr = D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1_0, serialized.GetAddressOf(), error.GetAddressOf());
+	if(error) 
+		OutputDebugStringA((char*)error->GetBufferPointer());
+
+	ThrowIfFailed(hr);
+	ThrowIfFailed(g_device->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(), IID_PPV_ARGS(&mSsaoBlurRootSignature)));
+}
+
+void Init::BuildSsaoBlurPSO()
+{
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = {};
+	desc.InputLayout = { nullptr, 0 };
+	desc.pRootSignature = mSsaoBlurRootSignature.Get();
+	desc.VS = 
+	{
+		reinterpret_cast<BYTE*>(mShaders["ssaoBlurVS"]->GetBufferPointer()),
+		mShaders["ssaoBlurVS"]->GetBufferSize()
+	};
+	desc.PS =
+	{
+		reinterpret_cast<BYTE*>(mShaders["ssaoBlurPS"]->GetBufferPointer()),
+		mShaders["ssaoBlurPS"]->GetBufferSize()
+	};
+	desc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+	desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+	desc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+	desc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+	desc.DepthStencilState.DepthEnable = false;
+	desc.SampleMask = UINT_MAX;
+	desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	desc.NumRenderTargets = 1;
+	desc.RTVFormats[0] = mAoMapFormat;
+	desc.SampleDesc.Count = 1;
+	desc.DSVFormat = DXGI_FORMAT_UNKNOWN;
+	ThrowIfFailed(g_device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&mSsaoBlurPSO)));
 }
 
 /*
