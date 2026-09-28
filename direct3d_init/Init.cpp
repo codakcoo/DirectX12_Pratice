@@ -120,6 +120,8 @@ LRESULT Init::MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 			mShowSsao = !mShowSsao;
 		else if ((int)wParam == VK_F7)
 			mSsaoBlurEnabled = !mSsaoBlurEnabled;
+		else if ((int)wParam == VK_F8)
+			mUseQuatAnim = !mUseQuatAnim;
 
 		return 0;
 	}
@@ -286,6 +288,7 @@ bool Init::InitD3D()
 	BuildBoxGeometry();							// 박스 지오메트리 생성, 여기서 정점/인덱스 버퍼 업로드 명령 기록
 	BuildFrameResources();						// 디바이스만 있으면 되니 근처 아무데나(g_device만 있으됨)
 	BuildRenderItems();
+	DefineCubeAnimation();
 	BuildPSO();									// 파이프라인 상태 객체 생성
 
 	BuildSsaoRootSignature();
@@ -437,10 +440,24 @@ void Init::Update(const GameTimer& gt)
 	// 물체마다 개별 계산해서 각자의 슬롯(index)에 복사
 	for (int i = 0; i < NumObjects; ++i)
 	{
-		mObjectThetas[i] += gt.DeltaTime() * (1.0f + i * 0.1f);					// 물체마다 속도 다르게
 		XMMATRIX baseTranslate = XMLoadFloat4x4(&mObjectWorlds[i]);
-		XMMATRIX spin = XMMatrixRotationY(mObjectThetas[i]);
-		XMMATRIX world = spin * baseTranslate;									// 자전 후 배치 위치로 이동
+		XMMATRIX world;
+
+		if (mUseQuatAnim)
+		{
+			// 큐브마다 0.02초씩 시간차 -> 파도처럼
+			float len = mCubeAnim.GetEndTime();
+			float t = fmodf(gt.TotalTime() + i * 0.02f, len);
+
+			XMFLOAT4X4 anim = MathHelper::Identity4x4();
+			mCubeAnim.Interpolate(t, anim);
+			world = XMLoadFloat4x4(&anim) * baseTranslate;							// 로컬 애니메이션 후 배치
+		}
+		else
+		{
+			mObjectThetas[i] += gt.DeltaTime() * (1.0f + i * 0.1f);					// 물체마다 속도 다르게
+			world = XMMatrixRotationY(mObjectThetas[i]) * baseTranslate;			// 자전 후 배치 위치로 이동
+		}
 
 		// -- GPU Scene: 컬링과 무관하게 항상 자기 슬롯(i)에 --
 		InstanceData data;
@@ -449,26 +466,6 @@ void Init::Update(const GameTimer& gt)
 
 		// -- 섀도 뷰: 지금은 전부 (다음 단계에서 라이트 박스로 컬링)
 		mCurrFrameResource->VisibleIndexBuffer->CopyData(shadowIdx++, (UINT)i);
-
-		//// -- 카메라 뷰: 프리스텀 컬링 --
-		//if (mFrustumCullingEnabled)
-		//{
-		//	// 큐브의 로컬 AABBb (큐브가 +-1 크기니까 중심 원점, 반경1)
-		//	BoundingBox localBox;
-		//	localBox.Center = { 0.0f, 0.0f, 0.0f };
-		//	localBox.Extents = { 1.0f, 1.0f, 1.0f };
-		//
-		//
-		//	BoundingBox viewBox;
-		//	localBox.Transform(viewBox, world * view);				// 큐브 박스를 뷰 공간으로
-		//	// 뷰 공간 절두체 vs 뷰 공간 박스
-		//	if(mCameraFrustum.Contains(viewBox) == DirectX::DISJOINT)
-		//		continue;				// 절두체 밖 -> 안 그림
-		//}
-
-
-		//mCurrFrameResource->VisibleIndexBuffer->CopyData(NumObjects + visibleIdx, (UINT)i);
-		//visibleIdx++;
 	}
 
 	mShadowCount = shadowIdx;
@@ -2020,6 +2017,39 @@ std::vector<float> Init::CalcGaussWeights(float sigma)
 D3D12_CPU_DESCRIPTOR_HANDLE Init::OffscreenRtv() const
 {
 	return mOffscreenRtvHeap->GetCPUDescriptorHandleForHeapStart();
+}
+
+/*
+* q1의 축 (1,1,2)는 정규화되지 않은 벡터입니다. 
+* XMQuaternionRotationAxis는 정규화된 축을 가정합니다. 
+* 그래서 q1만 XMQuaternionRotationNormal(XMVector3Normalize(...), ...)로 만드는 게 정확합니다.
+*/
+void Init::DefineCubeAnimation()
+{
+	XMVECTOR q0 = XMQuaternionRotationAxis(XMVectorSet(0, 1, 0, 0), XMConvertToRadians(0.0f));
+	XMVECTOR q1 = XMQuaternionRotationNormal(XMVector3Normalize(XMVectorSet(1, 1, 2, 0)), XMConvertToRadians(90.0f));				// 축은 내부에서 정규화 안 됨
+	XMVECTOR q2 = XMQuaternionRotationAxis(XMVectorSet(0, 1, 0, 0), XMConvertToRadians(180.0f));
+	XMVECTOR q3 = XMQuaternionRotationAxis(XMVectorSet(1, 0, 0, 0), XMConvertToRadians(90.0f));
+
+	// 칸 간격이 3이라 이동은 +-0.5, 스케일은 1 이하로 (이웃과 안 겹치고 컬링 반경도 그대로 유효)
+	struct K { float t; XMFLOAT3 p; float s; XMVECTOR q; } ks[] =
+	{
+		{ 0.0f, { 0.0f,  0.0f,  0.0f }, 1.0f, q0 },
+		{ 1.0f, { 0.0f,  0.5f,  0.0f }, 0.6f, q1 },
+		{ 2.0f, { 0.5f,  0.0f,  0.0f }, 1.0f, q2 },
+		{ 3.0f, { 0.0f, -0.5f,  0.0f }, 0.6f, q3 },
+		{ 4.0f, { 0.0f,  0.0f,  0.0f }, 1.0f, q0 },					// 처음과 같게 -> 루프 이음새 없음
+	};
+
+	mCubeAnim.Keyframes.resize(_countof(ks));
+	for (size_t i = 0; i < _countof(ks); ++i)
+	{
+		auto& k = mCubeAnim.Keyframes[i];
+		k.TimePos = ks[i].t;
+		k.Translation = ks[i].p;
+		k.Scale = { ks[i].s, ks[i].s, ks[i].s };
+		XMStoreFloat4(&k.RotationQuat, ks[i].q);
+	}
 }
 
 

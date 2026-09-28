@@ -20,6 +20,7 @@
 #include "GeometryTypes.h"
 #include "DDSTextureLoader.h"
 #include "Camera.h"
+#include "Animation.h"
 
 
 using namespace std;
@@ -151,6 +152,9 @@ protected:
 	std::vector<float> CalcGaussWeights(float sigma);
 
 	D3D12_CPU_DESCRIPTOR_HANDLE OffscreenRtv() const;			// 핸들 접근용 헬퍼
+
+	// 쿼터니언
+	void DefineCubeAnimation();
 
 protected:
 
@@ -315,4 +319,8 @@ protected:
 	ComPtr<ID3D12PipelineState> mSsaoBlurPSO = nullptr;
 	SsaoBlurConstants mSsaoBlurConstants = {};
 	bool mSsaoBlurEnabled = true;
+
+	// 쿼터니언
+	BoneAnimation mCubeAnim;
+	bool mUseQuatAnim = true;
 };
