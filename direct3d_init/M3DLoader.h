@@ -3,6 +3,7 @@
 #include <vector>
 #include <cstdint>
 #include <DirectXMath.h>
+#include "Animation.h"
 
 using namespace std;
 using namespace DirectX;
@@ -40,6 +41,7 @@ public:
 		vector<SkinnedVertex>& vertices,
 		vector<uint16_t>& indices,
 		vector<M3dSubset>& subsets,
-		vector<M3dMaterial>& mats);
+		vector<M3dMaterial>& mats,
+		SkinnedData& skinInfo);
 };
 

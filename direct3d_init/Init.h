@@ -334,4 +334,10 @@ protected:
 	vector<M3dSubset> mSoldierSubsets;
 	vector<std::unique_ptr<Texture>> mSoldierTex;		// diff0, norm0, diff1, norm1, ...
 	static const UINT SoldierSrvStart = 8;				// Srv 8 ~ 17
+
+	// 본 계층 + 오프셋 + 애니메이션 클립 로드, CPU에서 최종 변환 계산
+	SkinnedData				mSoldierSkin;
+	std::string				mSoldierClip;
+	float					mSoldierTime = 0.0f;
+	std::vector<XMFLOAT4X4>	mSoldierFinal;						
 };

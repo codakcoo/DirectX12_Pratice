@@ -480,6 +480,12 @@ void Init::Update(const GameTimer& gt)
 	mCurrFrameResource->InstanceBuffer->CopyData(NumObjects, sd);
 	mCurrFrameResource->VisibleIndexBuffer->CopyData(NumObjects, (UINT)NumObjects);				// [1000] = 1000
 
+	// -- 병사 애니메이션 (CPU 팔례트) --
+	mSoldierTime = gt.DeltaTime();
+	float clipEnd = mSoldierSkin.GetClipEndTime(mSoldierClip);
+	if (mSoldierTime > clipEnd) mSoldierTime = fmodf(mSoldierTime, clipEnd);
+	mSoldierSkin.GetFinalTransforms(mSoldierClip, mSoldierTime, mSoldierFinal);
+
 	mShadowCount = shadowIdx;
 	mVisibleCount = mGPUVisibleCount;			// 보이는 개수 저장
 }
@@ -2055,8 +2061,18 @@ void Init::LoadSoldier()
 	std::vector<std::uint16_t> indices;
 	std::vector<M3dMaterial> mats;
 
-	if(!M3DLoader::LoadM3d("Models\\soldier.m3d", vertices, indices, mSoldierSubsets, mats))
+	if(!M3DLoader::LoadM3d("Models\\soldier.m3d", vertices, indices, mSoldierSubsets, mats, mSoldierSkin))
 		ThrowIfFailed(E_FAIL);							// 경로 또는 파싱 실패
+
+	mSoldierClip = mSoldierSkin.FirstClipName();					// soldier는 "Take1" 하나
+
+	// 검증 출력
+	{
+		char buf[160];
+		sprintf_s(buf, "[Skin] bones=%u clip=%s end=%.3f\n",
+						mSoldierSkin.BoneCount(), mSoldierClip.c_str(), mSoldierSkin.GetClipEndTime(mSoldierClip));
+		OutputDebugStringA(buf);
+	}
 
 	// 재질 i -> SRV 8+2i(디퓨즈), 9+2i(노멀)
 	for (auto& m : mats)

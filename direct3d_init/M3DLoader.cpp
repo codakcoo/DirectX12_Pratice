@@ -2,7 +2,12 @@
 #include <fstream>
 
 
-bool M3DLoader::LoadM3d(const string& filename, vector<SkinnedVertex>& vertices, vector<uint16_t>& indices, vector<M3dSubset>& subsets, vector<M3dMaterial>& mats)
+bool M3DLoader::LoadM3d(const string& filename, 
+                        vector<SkinnedVertex>& vertices, 
+                        vector<uint16_t>& indices, 
+                        vector<M3dSubset>& subsets, 
+                        vector<M3dMaterial>& mats, 
+                        SkinnedData& skinInfo)
 {
     ifstream fin(filename);
     if(!fin) return false;
@@ -64,6 +69,59 @@ bool M3DLoader::LoadM3d(const string& filename, vector<SkinnedVertex>& vertices,
     fin >> ignore;                                  // ***Triangles***
     indices.resize(numTriangles * 3);
     for (auto& i : indices) fin >> i;
+
+    // ---- 본 오프셋 (역바이드) ----
+    fin >> ignore;                                  // ***BoneOffsets***
+    vector<XMFLOAT4X4> boneOffsets(numBones);
+    for (auto& m : boneOffsets)
+    {
+        fin >> ignore;                              // BoneOffset0
+        fin >> m._11 >> m._12 >> m._13 >> m._14
+            >> m._21 >> m._22 >> m._23 >> m._24
+            >> m._31 >> m._32 >> m._33 >> m._34
+            >> m._41 >> m._42 >> m._43 >> m._44;
+    }
+
+    // ---- 본 계층 ----
+    fin >> ignore;                                  // ***BoneHierarchy***
+    vector<int> bonehierarchy(numBones);
+    for (auto& p : bonehierarchy)
+        fin >> ignore >> p;                         // ParentIndexOfBone0: -1
+
+    // ---- 애니메이션 클립 ----
+    fin >> ignore;                                  // ***AnimationClips***
+    unordered_map<string, AnimationClip> clips;
+    for (uint32_t c = 0; c < numClips; ++c)
+    {
+        string clipName;
+        fin >> ignore >> clipName;                  // AnimationClip Take1
+        fin >> ignore;                              // {
+
+        AnimationClip clip;
+        clip.BoneAnimations.resize(numBones);
+        for (auto& ba : clip.BoneAnimations)
+        {
+            string tok;
+            while (fin >> tok && tok != "#Keyframes:") {}               // "Bone0 #Keyframes: 58"
+            uint32_t numKeys = 0;
+            fin >> numKeys;
+            fin >> ignore;                          // {
+
+            ba.Keyframes.resize(numKeys);
+            for (auto& k : ba.Keyframes)
+            {
+                fin >> ignore >> k.TimePos
+                    >> ignore >> k.Translation.x >> k.Translation.y >> k.Translation.z
+                    >> ignore >> k.Scale.x >> k.Scale.y >> k.Scale.z
+                    >> ignore >> k.RotationQuat.x >> k.RotationQuat.y >> k.RotationQuat.z >> k.RotationQuat.w;
+            }
+            fin >> ignore;                          // }
+        }
+        fin >> ignore;                              // }
+        clips[clipName] = std::move(clip);
+    }
+
+    skinInfo.Set(bonehierarchy, boneOffsets, clips);
 
     // 본 오프셋 / 계층 / 클립은 2단계에서
     return !fin.fail();
