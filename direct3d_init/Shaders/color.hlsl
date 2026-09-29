@@ -67,9 +67,11 @@ float4 PS(VertexOut pin) : SV_TARGET
 {
     float4 diffuseAlbedo = gDiffuseMap.Sample(gsamLinear, pin.TexC);
     
+    pin.NormalW = normalize(pin.NormalW);
+    pin.TangentW = normalize(pin.TangentW); // 이름은 VS 출력 멤버에 맞게
     // 노멀맵에서 노멀 읽어서 월드 공간으로
     float4 normalMapSample = gNormalMap.Sample(gsamLinear, pin.TexC);                                           // float4 -> rgb에서 rgba로
-    float3 bumpNormalW = NormalSampleToWorldSpace(normalMapSample.rgb, normalize(pin.NormalW), pin.TangentW);
+    float3 bumpNormalW = NormalSampleToWorldSpace(normalMapSample.rgb, pin.NormalW, pin.TangentW);
     
     float3 lightDir = normalize(-gLights[0].Direction);
     float ndotl = max(dot(bumpNormalW, lightDir), 0.0f);

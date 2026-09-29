@@ -470,6 +470,16 @@ void Init::Update(const GameTimer& gt)
 		mCurrFrameResource->VisibleIndexBuffer->CopyData(shadowIdx++, (UINT)i);
 	}
 
+	// -- 병사 (슬롯 NumObjects) --
+	XMMATRIX soldierWorld = XMMatrixScaling(0.05f, 0.05f, -0.05f) 
+							* XMMatrixRotationY(XM_PI) 
+							* XMMatrixTranslation(0.0f, -16.0f, -22.0f);		// 큐브 격자 앞, 바닥 높이
+
+	InstanceData sd;
+	XMStoreFloat4x4(&sd.World, XMMatrixTranspose(soldierWorld));
+	mCurrFrameResource->InstanceBuffer->CopyData(NumObjects, sd);
+	mCurrFrameResource->VisibleIndexBuffer->CopyData(NumObjects, (UINT)NumObjects);				// [1000] = 1000
+
 	mShadowCount = shadowIdx;
 	mVisibleCount = mGPUVisibleCount;			// 보이는 개수 저장
 }
@@ -599,6 +609,8 @@ void Init::Draw()
 	g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	g_commandList->DrawIndexedInstanced(36, mShadowCount, 0, 0, 0);
 
+	DrawSoldier(false);															// 섀도는 텍스처 불필요 (이 시점엔 SRV 힙도 안 묶임)
+
 	auto shadowToRead = CD3DX12_RESOURCE_BARRIER::Transition(mShadowMap.Get(),
 		D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_GENERIC_READ);
 	g_commandList->ResourceBarrier(1, &shadowToRead);
@@ -608,34 +620,6 @@ void Init::Draw()
 	g_commandList->RSSetScissorRects(1, &mScissorRect);
 
 	BindSceneRootArgs();										// <- 기존 "공용 바인딩" 블록 전체를 이 한 줄로
-
-	//// -- 공용 바인딩 (노멀 패스와 메인 패스가 같이 씀)
-	//g_commandList->SetGraphicsRootSignature(mRootSignature.Get());
-	//ID3D12DescriptorHeap* srvHeaps[] = { mSrvHeap.Get() };
-	//g_commandList->SetDescriptorHeaps(1, srvHeaps);
-
-	//auto heapStart = mSrvHeap->GetGPUDescriptorHandleForHeapStart();
-	//g_commandList->SetGraphicsRootDescriptorTable(0, heapStart);
-	//// t1 인스턴스 버퍼
-	//g_commandList->SetGraphicsRootShaderResourceView(1, mCurrFrameResource->InstanceBuffer->Resource()->GetGPUVirtualAddress());
-	//// b1 패스
-	//D3D12_GPU_VIRTUAL_ADDRESS passCBAddress = mCurrFrameResource->PassCB->Resource()->GetGPUVirtualAddress();
-	//g_commandList->SetGraphicsRootConstantBufferView(2, passCBAddress);				// 슬롯 1, 프레임당 한번만
-	//// 큐브맵
-	//CD3DX12_GPU_DESCRIPTOR_HANDLE cubeHandle(mSrvHeap->GetGPUDescriptorHandleForHeapStart());
-	//cubeHandle.Offset(1, g_cbvSrvUavDescriptorSize);						// 슬롯 1 = 큐브맵
-	//g_commandList->SetGraphicsRootDescriptorTable(3, cubeHandle);			// 루트 파라미터
-	//// 노멀맵
-	//CD3DX12_GPU_DESCRIPTOR_HANDLE normalHandle(mSrvHeap->GetGPUDescriptorHandleForHeapStart());
-	//normalHandle.Offset(2, g_cbvSrvUavDescriptorSize);						// 슬롯 2 = 노멀맵
-	//g_commandList->SetGraphicsRootDescriptorTable(4, normalHandle);			// 루트 파라미터 4 = t3
-	//// 섀도맵
-	//CD3DX12_GPU_DESCRIPTOR_HANDLE shadowHandle(mSrvHeap->GetGPUDescriptorHandleForHeapStart());
-	//shadowHandle.Offset(3, g_cbvSrvUavDescriptorSize);						// 슬롯 3 = 섀도맵
-	//g_commandList->SetGraphicsRootDescriptorTable(5, shadowHandle);			// 루트 파라미터 5 = t4
-	//// 메인 = GPU 컬링 결과
-	//g_commandList->SetGraphicsRootShaderResourceView(6, mCulledIndexBuffer->GetGPUVirtualAddress());
-	//g_commandList->SetGraphicsRoot32BitConstant(7, 0, 0);			// 카메라 목록: offset NumObjects
 
 
 	// 정점/인덱스
@@ -660,6 +644,7 @@ void Init::Draw()
 
 	g_commandList->SetPipelineState(mDrawNormalsPSO.Get());
 	g_commandList->ExecuteIndirect(mDrawCmdSig.Get(), 1, mDrawArgsBuffer.Get(), 0, nullptr, 0);
+	DrawSoldier(true);															// drawNormals PS가 노멀맵 사용
 	{
 		auto toSrv = CD3DX12_RESOURCE_BARRIER::Transition(mNormalMapRT.Get(),
 			D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -724,11 +709,7 @@ void Init::Draw()
 	g_commandList->SetPipelineState(mOpaquePSO.Get());					// EQUAL 테스트
 	g_commandList->ExecuteIndirect(mDrawCmdSig.Get(), 1, mDrawArgsBuffer.Get(), 0, nullptr, 0);
 
-	//// 드로우콜 1번으로 27개
-	//g_commandList->SetPipelineState(mShowNormals ? mDrawNormalsPSO.Get() : mOpaquePSO.Get());
-	////g_commandList->DrawIndexedInstanced(36, mVisibleCount, 0, 0, 0);			// 기존
-	//// 인스턴스 개수를 CPU가 전혀 모르는 상태에서 GPU가 쓴 InstanceCount로 그대로 그리게 된다.
-	//g_commandList->ExecuteIndirect(mDrawCmdSig.Get(), 1, mDrawArgsBuffer.Get(), 0, nullptr, 0);
+	DrawSoldier(true);
 
 	// 스카이박스
 	g_commandList->SetPipelineState(mSkyPSO.Get());
@@ -1111,7 +1092,7 @@ void Init::BuildFrameResources()
 {
 	for (int i = 0; i < NumFrameResources; ++i)
 	{
-		mFrameResources.push_back(std::make_unique<FrameResource>(g_device.Get(), 1, NumObjects));			// 물체 개수 NumObjects개
+		//mFrameResources.push_back(std::make_unique<FrameResource>(g_device.Get(), 1, NumObjects));			// 물체 개수 NumObjects개
 		mFrameResources.push_back(std::make_unique<FrameResource>(g_device.Get(), 1, NumObjects + 1));
 	}
 }
@@ -2107,6 +2088,27 @@ void Init::LoadSoldier()
 
 void Init::DrawSoldier(bool bindTextures)
 {
+	auto vbv = mSoldierGeo->VertexBufferView();
+	auto ibv = mSoldierGeo->IndexBufferView();
+	g_commandList->IASetVertexBuffers(0, 1, &vbv);
+	g_commandList->IASetIndexBuffer(&ibv);
+
+	// CPU 목록의 [NumObjects] 항목 -> 인스턴스 슬롯 NumObjects
+	g_commandList->SetGraphicsRootShaderResourceView(6, mCurrFrameResource->VisibleIndexBuffer->Resource()->GetGPUVirtualAddress());
+	g_commandList->SetGraphicsRoot32BitConstant(7, NumObjects, 0);				// gIndexOffset만 (디버그 플래그는 유지)
+
+	auto h = mSrvHeap->GetGPUDescriptorHandleForHeapStart();
+	UINT s = g_cbvSrvUavDescriptorSize;
+	for (const auto& sub : mSoldierSubsets)
+	{
+		if (bindTextures)
+		{
+			UINT slot = SoldierSrvStart + 2 * sub.Id;
+			g_commandList->SetGraphicsRootDescriptorTable(0, CD3DX12_GPU_DESCRIPTOR_HANDLE(h, slot, s));			// t0 디퓨즈
+			g_commandList->SetGraphicsRootDescriptorTable(4, CD3DX12_GPU_DESCRIPTOR_HANDLE(h, slot + 1, s));		// t4 노멀
+		}
+		g_commandList->DrawIndexedInstanced(sub.FaceCount * 3, 1, sub.FaceStart * 3, 0, 0);
+	}
 }
 
 

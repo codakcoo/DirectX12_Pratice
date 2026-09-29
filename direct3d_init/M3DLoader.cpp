@@ -34,7 +34,7 @@ bool M3DLoader::LoadM3d(const string& filename, vector<SkinnedVertex>& vertices,
 
     // ---- 서브셋 (재질 수와 같음) ----
     fin >> ignore;                                  // ***SubsetTable***
-    subsets.resize(numVertices);
+    subsets.resize(numMaterials);
     for (auto& s : subsets)
         fin >> ignore >> s.Id 
             >> ignore >> s.VertexStart 
