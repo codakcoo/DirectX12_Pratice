@@ -21,6 +21,7 @@
 #include "DDSTextureLoader.h"
 #include "Camera.h"
 #include "Animation.h"
+#include "M3DLoader.h"
 
 
 using namespace std;
@@ -155,6 +156,10 @@ protected:
 
 	// ÄõÅÍ´Ï¾ð
 	void DefineCubeAnimation();
+
+	// ½ºÅ°´×
+	void LoadSoldier();
+	void DrawSoldier(bool bindTextures);
 
 protected:
 
@@ -323,4 +328,10 @@ protected:
 	// ÄõÅÍ´Ï¾ð
 	BoneAnimation mCubeAnim;
 	bool mUseQuatAnim = true;
+
+	// ½ºÅ°´×
+	unique_ptr<MeshGeometry> mSoldierGeo;
+	vector<M3dSubset> mSoldierSubsets;
+	vector<std::unique_ptr<Texture>> mSoldierTex;		// diff0, norm0, diff1, norm1, ...
+	static const UINT SoldierSrvStart = 8;				// Srv 8 ~ 17
 };

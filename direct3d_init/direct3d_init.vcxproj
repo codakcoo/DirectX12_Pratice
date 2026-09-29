@@ -157,6 +157,7 @@ xcopy /E /I /Y "$(ProjectDir)Textures" "$(OutDir)Textures"</Command>
     <ClInclude Include="GeometryTypes.h" />
     <ClInclude Include="Init.h" />
     <ClInclude Include="LightingUtil.h" />
+    <ClInclude Include="M3DLoader.h" />
     <ClInclude Include="MathHelper.h" />
     <ClInclude Include="UploadBuffer.h" />
   </ItemGroup>
@@ -167,6 +168,7 @@ xcopy /E /I /Y "$(ProjectDir)Textures" "$(OutDir)Textures"</Command>
     <ClCompile Include="FrameResource.cpp" />
     <ClCompile Include="GameTimer.cpp" />
     <ClCompile Include="Init.cpp" />
+    <ClCompile Include="M3DLoader.cpp" />
     <ClCompile Include="MathHelper.cpp" />
   </ItemGroup>
   <ItemGroup>

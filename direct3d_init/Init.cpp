@@ -3,6 +3,7 @@
 #include <string>
 #include <assert.h>
 
+
 Init* Init::mApp = nullptr;						// 정적 멤버는 .cpp에서 정의 필수
 Init* Init::GetApp() { return mApp; }
 
@@ -281,6 +282,7 @@ bool Init::InitD3D()
 	ThrowIfFailed(g_commandList->Reset(g_commandAllocator.Get(), nullptr));	// 명령 목록 초기화)
 
 	LoadTextures();
+	LoadSoldier();
 	BuildRootSignature();						// 루트 서명 생성
 	BuildShadowMapResource();					// BuildSrvHeap보다 먼저 (SRV가 리소스를 참조하므로)
 	BuildSrvHeap();								// LoadTextures() 다음에
@@ -1110,6 +1112,7 @@ void Init::BuildFrameResources()
 	for (int i = 0; i < NumFrameResources; ++i)
 	{
 		mFrameResources.push_back(std::make_unique<FrameResource>(g_device.Get(), 1, NumObjects));			// 물체 개수 NumObjects개
+		mFrameResources.push_back(std::make_unique<FrameResource>(g_device.Get(), 1, NumObjects + 1));
 	}
 }
 
@@ -1941,7 +1944,7 @@ void Init::LoadTextures()
 void Init::BuildSrvHeap()
 {
 	D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-	srvHeapDesc.NumDescriptors = 8;										// 0 박스, 1 큐브맵,  2 노멀맵, 3 섀도맵, 4 노멀 RT, 5 깊이, 6 AO0, 7 AO1
+	srvHeapDesc.NumDescriptors = SoldierSrvStart + (UINT)mSoldierTex.size();   // 8 + 10 = 18
 	srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 	srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;		// 필수
 	ThrowIfFailed(g_device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&mSrvHeap)));
@@ -1986,6 +1989,17 @@ void Init::BuildSrvHeap()
 	shadowSrv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 	shadowSrv.Texture2D.MipLevels = 1;
 	g_device->CreateShaderResourceView(mShadowMap.Get(), &shadowSrv, handle);
+
+	for (size_t i = 0; i < mSoldierTex.size(); ++i)
+	{
+		auto& res = mSoldierTex[i]->Resource;
+		D3D12_SHADER_RESOURCE_VIEW_DESC d = srvDesc;
+		d.Format = res->GetDesc().Format;
+		d.Texture2D.MipLevels = res->GetDesc().MipLevels;
+		g_device->CreateShaderResourceView(res.Get(), &d,
+			CD3DX12_CPU_DESCRIPTOR_HANDLE(mSrvHeap->GetCPUDescriptorHandleForHeapStart(),
+				SoldierSrvStart + (UINT)i, g_cbvSrvUavDescriptorSize));
+	}
 }
 
 // sigma가 클수록 더 흐려짐
@@ -2050,6 +2064,49 @@ void Init::DefineCubeAnimation()
 		k.Scale = { ks[i].s, ks[i].s, ks[i].s };
 		XMStoreFloat4(&k.RotationQuat, ks[i].q);
 	}
+}
+
+static_assert(offsetof(SkinnedVertex, TangentU) == offsetof(Vertex, TangentU), "SkinnedVertex 앞부분이 Vertex와 달라짐");
+
+void Init::LoadSoldier()
+{
+	std::vector<SkinnedVertex> vertices;
+	std::vector<std::uint16_t> indices;
+	std::vector<M3dMaterial> mats;
+
+	if(!M3DLoader::LoadM3d("Models\\soldier.m3d", vertices, indices, mSoldierSubsets, mats))
+		ThrowIfFailed(E_FAIL);							// 경로 또는 파싱 실패
+
+	// 재질 i -> SRV 8+2i(디퓨즈), 9+2i(노멀)
+	for (auto& m : mats)
+	{
+		for (const string* name : { &m.DiffuseMapName, &m.NormalMapName })
+		{
+			auto tex = make_unique<Texture>();
+			tex->name = *name;
+			tex->Filename = L"Textures\\" + std::wstring(name->begin(), name->end());
+			ThrowIfFailed(DirectX::CreateDDSTextureFromFile12(g_device.Get(), g_commandList.Get(),
+				tex->Filename.c_str(), tex->Resource, tex->UploadHeap));
+			mSoldierTex.push_back(std::move(tex));
+		}
+	}
+
+	const UINT vbByteSize = (UINT)(vertices.size() * sizeof(SkinnedVertex));
+	const UINT ibByteSize = (UINT)(indices.size() * sizeof(std::uint16_t));
+
+	mSoldierGeo = std::make_unique<MeshGeometry>();
+	mSoldierGeo->VertexBufferGPU = d3dUtil::CreateDefaultBuffer(g_device.Get(), g_commandList.Get(),
+		vertices.data(), vbByteSize, mSoldierGeo->VertexBufferUploader);
+	mSoldierGeo->IndexBufferGPU = d3dUtil::CreateDefaultBuffer(g_device.Get(), g_commandList.Get(),
+		indices.data(), ibByteSize, mSoldierGeo->IndexBufferUploader);
+	mSoldierGeo->VertexByteStride = sizeof(SkinnedVertex);
+	mSoldierGeo->VertexBufferByteSize = vbByteSize;
+	mSoldierGeo->IndexFormat = DXGI_FORMAT_R16_UINT;
+	mSoldierGeo->IndexBufferByteSize = ibByteSize;
+}
+
+void Init::DrawSoldier(bool bindTextures)
+{
 }
 
 
