@@ -159,7 +159,7 @@ protected:
 
 	// 스키닝
 	void LoadSoldier();
-	void DrawSoldier(bool bindTextures);
+	void DrawSoldier(ID3D12PipelineState* pso, bool bindTextures);
 
 protected:
 
@@ -336,6 +336,10 @@ protected:
 	static const UINT SoldierSrvStart = 8;				// Srv 8 ~ 17
 
 	// 본 계층 + 오프셋 + 애니메이션 클립 로드, CPU에서 최종 변환 계산
+	std::vector<D3D12_INPUT_ELEMENT_DESC> mSkinnedInputLayout;
+	ComPtr<ID3D12PipelineState> mSkinnedOpaquePSO;
+	ComPtr<ID3D12PipelineState> mSkinnedDrawNormalPSO;
+
 	SkinnedData				mSoldierSkin;
 	std::string				mSoldierClip;
 	float					mSoldierTime = 0.0f;

@@ -481,10 +481,15 @@ void Init::Update(const GameTimer& gt)
 	mCurrFrameResource->VisibleIndexBuffer->CopyData(NumObjects, (UINT)NumObjects);				// [1000] = 1000
 
 	// -- 병사 애니메이션 (CPU 팔례트) --
-	mSoldierTime = gt.DeltaTime();
+	mSoldierTime += gt.DeltaTime();
 	float clipEnd = mSoldierSkin.GetClipEndTime(mSoldierClip);
 	if (mSoldierTime > clipEnd) mSoldierTime = fmodf(mSoldierTime, clipEnd);
 	mSoldierSkin.GetFinalTransforms(mSoldierClip, mSoldierTime, mSoldierFinal);
+
+	SkinnedConstants skc;
+	for (size_t i = 0; i < mSoldierFinal.size(); ++i)
+		XMStoreFloat4x4(&skc.BoneTransforms[i], XMMatrixTranspose(XMLoadFloat4x4(&mSoldierFinal[i])));
+	mCurrFrameResource->SkinnedCB->CopyData(0, skc);
 
 	mShadowCount = shadowIdx;
 	mVisibleCount = mGPUVisibleCount;			// 보이는 개수 저장
@@ -615,7 +620,7 @@ void Init::Draw()
 	g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	g_commandList->DrawIndexedInstanced(36, mShadowCount, 0, 0, 0);
 
-	DrawSoldier(false);															// 섀도는 텍스처 불필요 (이 시점엔 SRV 힙도 안 묶임)
+	DrawSoldier(mShadowPSO.Get(), false);															// 섀도
 
 	auto shadowToRead = CD3DX12_RESOURCE_BARRIER::Transition(mShadowMap.Get(),
 		D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_GENERIC_READ);
@@ -650,7 +655,7 @@ void Init::Draw()
 
 	g_commandList->SetPipelineState(mDrawNormalsPSO.Get());
 	g_commandList->ExecuteIndirect(mDrawCmdSig.Get(), 1, mDrawArgsBuffer.Get(), 0, nullptr, 0);
-	DrawSoldier(true);															// drawNormals PS가 노멀맵 사용
+	DrawSoldier(mSkinnedDrawNormalPSO.Get(), true);															// 노멀-깊이
 	{
 		auto toSrv = CD3DX12_RESOURCE_BARRIER::Transition(mNormalMapRT.Get(),
 			D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -715,7 +720,7 @@ void Init::Draw()
 	g_commandList->SetPipelineState(mOpaquePSO.Get());					// EQUAL 테스트
 	g_commandList->ExecuteIndirect(mDrawCmdSig.Get(), 1, mDrawArgsBuffer.Get(), 0, nullptr, 0);
 
-	DrawSoldier(true);
+	DrawSoldier(mSkinnedOpaquePSO.Get(), true);																// 메인
 
 	// 스카이박스
 	g_commandList->SetPipelineState(mSkyPSO.Get());
@@ -975,7 +980,7 @@ void Init::BuildRootSignature()
 	ssaoTable.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 6);		// t6(AO맵)
 	
 	// cbv의 힙을 사용하지 않고 루트 디스크립터 방식으로 GPU 주소로 바로 때려박기 때문에 heap(공간), table(참조)를 안만들어도 됨.
-	CD3DX12_ROOT_PARAMETER slotRootParameter[9];
+	CD3DX12_ROOT_PARAMETER slotRootParameter[10];
 	slotRootParameter[0].InitAsDescriptorTable(1, &texTable, D3D12_SHADER_VISIBILITY_PIXEL);		// t0 텍스처	
 	slotRootParameter[1].InitAsShaderResourceView(1);												// t1 - 물체별 (1)은 레지스터 t1을 뜻함.
 	slotRootParameter[2].InitAsConstantBufferView(1);												// b1 - 패스별
@@ -985,6 +990,7 @@ void Init::BuildRootSignature()
 	slotRootParameter[6].InitAsShaderResourceView(5);												// t5 가시 인덱스 목록
 	slotRootParameter[7].InitAsConstants(2,2);														// b2 인덱스 오프셋(uint 1개) + 디버그 플래그
 	slotRootParameter[8].InitAsDescriptorTable(1, &ssaoTable, D3D12_SHADER_VISIBILITY_PIXEL);		// t6 AO맵
+	slotRootParameter[9].InitAsConstantBufferView(3);												// b3 본 팔레트
 
 	// 정적 샘플러 - 지난번 얘기한 그 방식, 별도 힙 불필요
 	CD3DX12_STATIC_SAMPLER_DESC linearWrap(
@@ -1005,7 +1011,7 @@ void Init::BuildRootSignature()
 
 	std::array<CD3DX12_STATIC_SAMPLER_DESC, 2> samplers = { linearWrap, shadowSampler };
 
-	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(9, slotRootParameter, 
+	CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc(10, slotRootParameter, 
 		(UINT)samplers.size(), samplers.data(),
 		D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
@@ -1154,6 +1160,8 @@ void Init::BuildRenderItems()
 
 void Init::BuildShadersAndInputLayout()
 {
+	const D3D_SHADER_MACRO skinnedDefines[] = { { "SKINNED", "1" }, { nullptr, nullptr } };
+
 	// 픽셀
 	mShaders["defaultVS"] = d3dUtil::CompileShader(L"Shaders\\color.hlsl", nullptr, "VS", "vs_5_0");
 	mShaders["defaultPS"] = d3dUtil::CompileShader(L"Shaders\\color.hlsl", nullptr, "PS", "ps_5_0");
@@ -1179,12 +1187,25 @@ void Init::BuildShadersAndInputLayout()
 	mShaders["ssaoBlurVS"] = d3dUtil::CompileShader(L"Shaders\\ssaoBlur.hlsl", nullptr, "VS", "vs_5_0");
 	mShaders["ssaoBlurPS"] = d3dUtil::CompileShader(L"Shaders\\ssaoBlur.hlsl", nullptr, "PS", "ps_5_0");
 
+	// skinned
+	mShaders["skinnedVS"] = d3dUtil::CompileShader(L"Shaders\\color.hlsl", skinnedDefines, "VS", "vs_5_0");
+	mShaders["skinnedDrawNormalsVS"] = d3dUtil::CompileShader(L"Shaders\\drawNormals.hlsl", skinnedDefines, "VS", "vs_5_0");
+
 	mInputLayout =
 	{
 		{ "POSITION",	0,	DXGI_FORMAT_R32G32B32_FLOAT,	0,	0,							D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
 		{ "NORMAL",		0,	DXGI_FORMAT_R32G32B32_FLOAT,	0,	offsetof(Vertex, Normal),	D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
 		{ "TEXCOORD",	0,	DXGI_FORMAT_R32G32_FLOAT,		0,	offsetof(Vertex, TexC),		D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
 		{ "TANGENT",	0,	DXGI_FORMAT_R32G32B32_FLOAT,	0,	offsetof(Vertex, TangentU),	D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+	};
+	mSkinnedInputLayout =
+	{
+		{ "POSITION",		0,	DXGI_FORMAT_R32G32B32_FLOAT,	0,	offsetof(SkinnedVertex, Pos),			D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "NORMAL",			0,	DXGI_FORMAT_R32G32B32_FLOAT,	0,	offsetof(SkinnedVertex, Normal),		D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD",		0,	DXGI_FORMAT_R32G32_FLOAT,		0,	offsetof(SkinnedVertex, TexC),			D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TANGENT",		0,	DXGI_FORMAT_R32G32B32_FLOAT,	0,	offsetof(SkinnedVertex, TangentU),		D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "WEIGHTS",		0,	DXGI_FORMAT_R32G32B32_FLOAT,	0,	offsetof(SkinnedVertex, BoneWeights),	D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "BONEINDICES",	0,	DXGI_FORMAT_R8G8B8A8_UINT,		0,	offsetof(SkinnedVertex, BoneIndices),	D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
 	};
 }
 
@@ -1280,6 +1301,18 @@ void Init::BuildPSO()
 
 	ThrowIfFailed(g_device->CreateGraphicsPipelineState(&shadowPsoDesc, IID_PPV_ARGS(&mShadowPSO)));
 
+	// 메인 스키닝 (EQUAL, PS는 기존 그대로)
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC skinnedOpaque = opaquePsoDesc;
+	skinnedOpaque.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+	skinnedOpaque.InputLayout = { mSkinnedInputLayout.data(), (UINT)mSkinnedInputLayout.size() };
+	skinnedOpaque.VS = 
+	{
+		reinterpret_cast<BYTE*>(mShaders["skinnedVS"]->GetBufferPointer()),
+		mShaders["skinnedVS"]->GetBufferSize()
+	};
+	ThrowIfFailed(g_device->CreateGraphicsPipelineState(&skinnedOpaque, IID_PPV_ARGS(&mSkinnedOpaquePSO)));
+
+	// 노멀맵 PSO
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC normalsPsoDesc = basePsoDesc;
 	normalsPsoDesc.VS = 
 	{ 
@@ -1296,6 +1329,14 @@ void Init::BuildPSO()
 	normalsPsoDesc.SampleDesc.Quality = 0;
 	ThrowIfFailed(g_device->CreateGraphicsPipelineState(&normalsPsoDesc, IID_PPV_ARGS(&mDrawNormalsPSO)));
 
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC skinnedNormals = normalsPsoDesc;
+	skinnedNormals.InputLayout = { mSkinnedInputLayout.data(), (UINT)mSkinnedInputLayout.size() };
+	skinnedNormals.VS = 
+	{
+		reinterpret_cast<BYTE*>(mShaders["skinnedDrawNormalsVS"]->GetBufferPointer()),
+		mShaders["skinnedDrawNormalsVS"]->GetBufferSize()
+	};
+	ThrowIfFailed(g_device->CreateGraphicsPipelineState(&skinnedNormals, IID_PPV_ARGS(&mSkinnedDrawNormalPSO)));
 }
 
 void Init::BuildOffscreenResources()
@@ -1798,6 +1839,7 @@ void Init::BindSceneRootArgs()
 	UINT viewCounts[2] = { 0, mShowSsao ? 1u : 0u };
 	g_commandList->SetGraphicsRoot32BitConstants(7, 2, viewCounts, 0);																// b2
 	g_commandList->SetGraphicsRootDescriptorTable(8, CD3DX12_GPU_DESCRIPTOR_HANDLE(h, 6, s));										// t6 AO
+	g_commandList->SetGraphicsRootConstantBufferView(9, mCurrFrameResource->SkinnedCB->Resource()->GetGPUVirtualAddress());
 }
 
 void Init::BlurAoMap(int blurCount)
@@ -2102,8 +2144,10 @@ void Init::LoadSoldier()
 	mSoldierGeo->IndexBufferByteSize = ibByteSize;
 }
 
-void Init::DrawSoldier(bool bindTextures)
+void Init::DrawSoldier(ID3D12PipelineState* pso, bool bindTextures)
 {
+	g_commandList->SetPipelineState(pso);
+
 	auto vbv = mSoldierGeo->VertexBufferView();
 	auto ibv = mSoldierGeo->IndexBufferView();
 	g_commandList->IASetVertexBuffers(0, 1, &vbv);

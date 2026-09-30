@@ -3,10 +3,14 @@
 
 struct VertexIn
 {
-    float3 PosL : POSITION;
-    float3 NormalL : NORMAL;
-    float2 TexC : TEXCOORD;
-    float3 TangentU : TANGENT;
+    float3 PosL                 : POSITION;
+    float3 NormalL              : NORMAL;
+    float2 TexC                 : TEXCOORD;
+    float3 TangentU             : TANGENT;
+#ifdef SKINNED
+    float3 BoneWeights          : WEIGHTS;
+    uint4  BoneIndices          : BONEINDICES;
+#endif
 };
 
 struct VertexOut
@@ -20,6 +24,11 @@ struct VertexOut
 VertexOut VS(VertexIn vin, uint instanceID : SV_InstanceID)
 {
     VertexOut vout;
+    
+#ifdef SKINNED
+    SkinVertex(vin.BoneWeights, vin.BoneIndices, vin.PosL, vin.NormalL, vin.TangentU);
+#endif
+    
     float4x4 world = GetInstanceWorld(instanceID);
     float4 posW = mul(float4(vin.PosL, 1.0f), world);
     vout.NormalW = mul(vin.NormalL, (float3x3)world);

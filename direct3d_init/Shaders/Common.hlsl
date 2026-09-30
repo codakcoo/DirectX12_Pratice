@@ -49,6 +49,30 @@ cbuffer cbView : register(b2)
     uint gDebugSsao;                    // 1이면 AO만 출력
 };
 
+cbuffer cSkinned : register(b3)
+{
+    float4x4 gBoneTransforms[96];
+}
+
+#ifdef SKINNED
+// 가중치 4개(4번째 = 1 - 합)로 본 행렬을 섞음 (선형 블렌드 스키닝)
+void SkinVertex(float3 w3, uint4 idx, inout float3 posL, inout float3 normalL, inout float3 tangentL)
+{
+    float w[4] = { w3.x, w3.y, w3.z, 1.0f - w3.x - w3.y - w3.z };
+
+    float3 p = 0.0f, n = 0.0f, t = 0.0f;
+    [unroll]
+    for (int i = 0; i < 4; ++i)
+    {
+        float4x4 M = gBoneTransforms[idx[i]];
+        p += w[i] * mul(float4(posL, 1.0f), M).xyz;
+        n += w[i] * mul(normalL,  (float3x3)M);             // 본 행렬에 비균등 스케일 없음 가정
+        t += w[i] * mul(tangentL, (float3x3)M);
+    }
+    posL = p; normalL = n; tangentL = t;
+}
+#endif
+
 // 뷰별 목록 -> 전역 인스턴스 행렬
 float4x4 GetInstanceWorld(uint instanceID)
 {

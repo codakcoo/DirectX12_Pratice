@@ -51,6 +51,11 @@ struct PassConstants
 	DirectX::XMFLOAT4X4 View = MathHelper::Identity4x4();
 };
 
+struct SkinnedConstants
+{
+	DirectX::XMFLOAT4X4 BoneTransforms[96];
+};
+
 struct MeshGeometry
 {
 	ComPtr<ID3D12Resource> VertexBufferGPU = nullptr;

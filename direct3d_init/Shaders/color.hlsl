@@ -3,10 +3,14 @@
 
 struct VertexIn
 {
-    float3 PosL     : POSITION;
-    float3 NormalL  : NORMAL;
-    float2 TexC     : TEXCOORD;
-    float3 TangentU : TANGENT;
+    float3 PosL             : POSITION;
+    float3 NormalL          : NORMAL;
+    float2 TexC             : TEXCOORD;
+    float3 TangentU         : TANGENT;
+#ifdef SKINNED
+    float3 BoneWeights      : WEIGHTS;
+    uint4  BoneIndices      : BONEINDICES;
+#endif
 };
 
 struct VertexOut
@@ -47,6 +51,10 @@ float CalcShadowFactor(float4 shadowPosH)
 VertexOut VS(VertexIn vin, uint instanceID : SV_InstanceID)
 {
     VertexOut vout;
+    
+#ifdef SKINNED
+    SkinVertex(vin.BoneWeights, vin.BoneIndices, vin.PosL, vin.NormalL, vin.TangentU);
+#endif
     
     uint idx = gVisibleIndices[gIndexOffset + instanceID];
     float4x4 world = GetInstanceWorld(instanceID);                  // 내 인스턴스 행렬 골라 읽기
