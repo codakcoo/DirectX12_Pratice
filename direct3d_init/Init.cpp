@@ -491,6 +491,15 @@ void Init::Update(const GameTimer& gt)
 		XMStoreFloat4x4(&skc.BoneTransforms[i], XMMatrixTranspose(XMLoadFloat4x4(&mSoldierFinal[i])));
 	mCurrFrameResource->SkinnedCB->CopyData(0, skc);
 
+	// -- 바닥 (슬롯 FloorSlot) : 박스(+-1)를 50 x 0.01 x 50으로, 윗면이 y = -16 (병사 발)
+	XMMATRIX floorWorld = XMMatrixScaling(25.0f, 0.05f, 25.0f)
+							* XMMatrixTranslation(0.0f, -16.05f, -10.0f);			// z -32 ~ 15: 격자 + 병사 덮음
+
+	InstanceData fd;
+	XMStoreFloat4x4(&fd.World, XMMatrixTranspose(floorWorld));
+	mCurrFrameResource->InstanceBuffer->CopyData(FloorSlot, fd);
+	mCurrFrameResource->VisibleIndexBuffer->CopyData(FloorSlot, (UINT)FloorSlot);
+
 	mShadowCount = shadowIdx;
 	mVisibleCount = mGPUVisibleCount;			// 보이는 개수 저장
 }
@@ -594,6 +603,7 @@ void Init::Draw()
 	g_commandList->SetGraphicsRootSignature(mRootSignature.Get());
 	g_commandList->SetGraphicsRootShaderResourceView(1, mCurrFrameResource->InstanceBuffer->Resource()->GetGPUVirtualAddress());
 	g_commandList->SetGraphicsRootConstantBufferView(2, mCurrFrameResource->PassCB->Resource()->GetGPUVirtualAddress());
+	g_commandList->SetGraphicsRootConstantBufferView(9, mCurrFrameResource->SkinnedCB->Resource()->GetGPUVirtualAddress());
 
 	// 섀도 = CPU 목록(전체)
 	g_commandList->SetGraphicsRootShaderResourceView(6, mCurrFrameResource->VisibleIndexBuffer->Resource()->GetGPUVirtualAddress());
@@ -620,7 +630,7 @@ void Init::Draw()
 	g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	g_commandList->DrawIndexedInstanced(36, mShadowCount, 0, 0, 0);
 
-	DrawSoldier(mShadowPSO.Get(), false);															// 섀도
+	DrawSoldier(mSkinnedShadowPSO.Get(), false);															// 섀도
 
 	auto shadowToRead = CD3DX12_RESOURCE_BARRIER::Transition(mShadowMap.Get(),
 		D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_GENERIC_READ);
@@ -656,6 +666,7 @@ void Init::Draw()
 	g_commandList->SetPipelineState(mDrawNormalsPSO.Get());
 	g_commandList->ExecuteIndirect(mDrawCmdSig.Get(), 1, mDrawArgsBuffer.Get(), 0, nullptr, 0);
 	DrawSoldier(mSkinnedDrawNormalPSO.Get(), true);															// 노멀-깊이
+	DrawFloor(mDrawNormalsPSO.Get());
 	{
 		auto toSrv = CD3DX12_RESOURCE_BARRIER::Transition(mNormalMapRT.Get(),
 			D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -721,6 +732,7 @@ void Init::Draw()
 	g_commandList->ExecuteIndirect(mDrawCmdSig.Get(), 1, mDrawArgsBuffer.Get(), 0, nullptr, 0);
 
 	DrawSoldier(mSkinnedOpaquePSO.Get(), true);																// 메인
+	DrawFloor(mOpaquePSO.Get());
 
 	// 스카이박스
 	g_commandList->SetPipelineState(mSkyPSO.Get());
@@ -1104,8 +1116,7 @@ void Init::BuildFrameResources()
 {
 	for (int i = 0; i < NumFrameResources; ++i)
 	{
-		//mFrameResources.push_back(std::make_unique<FrameResource>(g_device.Get(), 1, NumObjects));			// 물체 개수 NumObjects개
-		mFrameResources.push_back(std::make_unique<FrameResource>(g_device.Get(), 1, NumObjects + 1));
+		mFrameResources.push_back(std::make_unique<FrameResource>(g_device.Get(), 1, NumObjects + 2));
 	}
 }
 
@@ -1190,6 +1201,9 @@ void Init::BuildShadersAndInputLayout()
 	// skinned
 	mShaders["skinnedVS"] = d3dUtil::CompileShader(L"Shaders\\color.hlsl", skinnedDefines, "VS", "vs_5_0");
 	mShaders["skinnedDrawNormalsVS"] = d3dUtil::CompileShader(L"Shaders\\drawNormals.hlsl", skinnedDefines, "VS", "vs_5_0");
+
+	// skinned-shadow
+	mShaders["skinnedShadowVS"] = d3dUtil::CompileShader(L"Shaders\\shadow.hlsl", skinnedDefines, "VS", "vs_5_0");
 
 	mInputLayout =
 	{
@@ -1300,6 +1314,16 @@ void Init::BuildPSO()
 	shadowPsoDesc.DSVFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
 
 	ThrowIfFailed(g_device->CreateGraphicsPipelineState(&shadowPsoDesc, IID_PPV_ARGS(&mShadowPSO)));
+
+	// 스키닝 PSO
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC skinnedShadow = shadowPsoDesc;
+	skinnedShadow.InputLayout = { mSkinnedInputLayout.data(), (UINT)mSkinnedInputLayout.size() };
+	skinnedShadow.VS = 
+	{
+		reinterpret_cast<BYTE*>(mShaders["skinnedShadowVS"]->GetBufferPointer()),
+		mShaders["skinnedShadowVS"]->GetBufferSize()
+	};
+	ThrowIfFailed(g_device->CreateGraphicsPipelineState(&skinnedShadow, IID_PPV_ARGS(&mSkinnedShadowPSO)));
 
 	// 메인 스키닝 (EQUAL, PS는 기존 그대로)
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC skinnedOpaque = opaquePsoDesc;
@@ -2169,6 +2193,26 @@ void Init::DrawSoldier(ID3D12PipelineState* pso, bool bindTextures)
 		}
 		g_commandList->DrawIndexedInstanced(sub.FaceCount * 3, 1, sub.FaceStart * 3, 0, 0);
 	}
+}
+
+void Init::DrawFloor(ID3D12PipelineState* pso)
+{
+	g_commandList->SetPipelineState(pso);
+
+	auto vbv = mBoxGeo->VertexBufferView();
+	auto ibv = mBoxGeo->IndexBufferView();
+	g_commandList->IASetVertexBuffers(0, 1, &vbv);
+	g_commandList->IASetIndexBuffer(&ibv);
+
+	g_commandList->SetGraphicsRootShaderResourceView(6, mCurrFrameResource->VisibleIndexBuffer->Resource()->GetGPUVirtualAddress());
+	g_commandList->SetGraphicsRoot32BitConstant(7, FloorSlot, 0);
+
+	// 병사가 t0/t3를 바꿔 놨으니 벽돌로 되돌림
+	auto h = mSrvHeap->GetGPUDescriptorHandleForHeapStart();
+	g_commandList->SetGraphicsRootDescriptorTable(0, h);																		// 슬롯 0 벽돌
+	g_commandList->SetGraphicsRootDescriptorTable(4, CD3DX12_GPU_DESCRIPTOR_HANDLE(h, 2, g_cbvSrvUavDescriptorSize));			// 슬롯 2 벽돌
+
+	g_commandList->DrawIndexedInstanced(36, 1, 0, 0, 0);
 }
 
 

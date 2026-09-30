@@ -339,9 +339,15 @@ protected:
 	std::vector<D3D12_INPUT_ELEMENT_DESC> mSkinnedInputLayout;
 	ComPtr<ID3D12PipelineState> mSkinnedOpaquePSO;
 	ComPtr<ID3D12PipelineState> mSkinnedDrawNormalPSO;
+	ComPtr<ID3D12PipelineState> mSkinnedShadowPSO;
 
 	SkinnedData				mSoldierSkin;
 	std::string				mSoldierClip;
 	float					mSoldierTime = 0.0f;
 	std::vector<XMFLOAT4X4>	mSoldierFinal;						
+
+
+	// ¹Ù´Ú
+	static const int FloorSlot = NumObjects + 1;			// 1001
+	void DrawFloor(ID3D12PipelineState* pso);
 };
